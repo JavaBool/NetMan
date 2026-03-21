@@ -1,0 +1,63 @@
+    Checking netman-server v0.1.0 (D:\Projects\Antigravity\NetMan\server)
+error[E0428]: the name `AudioState` is defined multiple times
+  --> src\main.rs:77:5
+   |
+58 |     AudioState {
+   |     ---------- previous definition of the type `AudioState` here
+...
+77 |     AudioState {
+   |     ^^^^^^^^^^ `AudioState` redefined here
+   |
+   = note: `AudioState` must be defined only once in the type namespace of this enum
+
+error[E0004]: non-exhaustive patterns: `ServerMessage::AudioState { .. }` not covered
+  --> src\main.rs:40:10
+   |
+40 | #[derive(Serialize, Debug)]
+   |          ^^^^^^^^^ pattern `ServerMessage::AudioState { .. }` not covered
+   |
+note: `ServerMessage` defined here
+  --> src\main.rs:42:6
+   |
+42 | enum ServerMessage {
+   |      ^^^^^^^^^^^^^
+...
+77 |     AudioState {
+   |     ---------- not covered
+   = note: the matched value is of type `ServerMessage`
+   = note: this error originates in the derive macro `Serialize` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0004]: non-exhaustive patterns: `&ServerMessage::AudioState { .. }` not covered
+  --> src\main.rs:40:21
+   |
+40 | #[derive(Serialize, Debug)]
+   |                     ^^^^^ pattern `&ServerMessage::AudioState { .. }` not covered
+   |
+note: `ServerMessage` defined here
+  --> src\main.rs:42:6
+   |
+42 | enum ServerMessage {
+   |      ^^^^^^^^^^^^^
+...
+77 |     AudioState {
+   |     ---------- not covered
+   = note: the matched value is of type `&ServerMessage`
+
+warning: unused variable: `shutdown_token_spawn`
+   --> src\main.rs:136:9
+    |
+136 |     let shutdown_token_spawn = shutdown_token.clone();
+    |         ^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_shutdown_token_spawn`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `master_clone`
+   --> src\main.rs:540:45
+    |
+540 | ...                   let master_clone = master.try_clone_reader().unwrap(); // Just to keep reference to master if needed
+    |                           ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_master_clone`
+
+Some errors have detailed explanations: E0004, E0428.
+For more information about an error, try `rustc --explain E0004`.
+warning: `netman-server` (bin "netman-server") generated 2 warnings
+error: could not compile `netman-server` (bin "netman-server") due to 3 previous errors; 2 warnings emitted

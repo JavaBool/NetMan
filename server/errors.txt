@@ -1,0 +1,17 @@
+warning: unused variable: `img`
+ --> src\bin\testcap2.rs:6:9
+  |
+6 |     let img = monitor.capture_image().expect("Capture failed");
+  |         ^^^ help: if this is intentional, prefix it with an underscore: `_img`
+  |
+  = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `img2`
+  --> src\bin\testcap2.rs:10:9
+   |
+10 |     let img2 = monitor.capture_image().expect("Capture failed");
+   |         ^^^^ help: if this is intentional, prefix it with an underscore: `_img2`
+
+    Checking netman-server v0.1.0 (D:\Projects\Antigravity\NetMan\server)
+warning: `netman-server` (bin "testcap2") generated 2 warnings (run `cargo fix --bin "testcap2" -p netman-server` to apply 2 suggestions)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.51s

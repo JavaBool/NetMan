@@ -1,0 +1,337 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>NetMan Launcher</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/src/styles.css" />
+  </head>
+  <body>
+    <div id="app">
+      <!-- LAUNCHER VIEW -->
+      <div id="launcher-view" class="view">
+        <div class="toolbar">
+          <div class="logo-wrap">
+            <svg class="logo" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2" ry="2"></rect><rect x="9" y="9" width="6" height="6"></rect><line x1="9" y1="1" x2="9" y2="4"></line><line x1="15" y1="1" x2="15" y2="4"></line><line x1="9" y1="20" x2="9" y2="23"></line><line x1="15" y1="20" x2="15" y2="23"></line><line x1="20" y1="9" x2="23" y2="9"></line><line x1="20" y1="14" x2="23" y2="14"></line><line x1="1" y1="9" x2="4" y2="9"></line><line x1="1" y1="14" x2="4" y2="14"></line></svg>
+            <h1>NetMan</h1>
+          </div>
+          <button id="btn-add-instance" class="primary-btn small">Add Server</button>
+        </div>
+        
+        <div id="instance-grid" class="instance-grid">
+           <!-- Populated dynamically -->
+        </div>
+
+        <!-- ADD MODAL -->
+        <div id="add-modal" class="modal-overlay">
+          <div class="modal-content glass-panel">
+            <h2>Add New Server</h2>
+            <div class="input-group">
+              <label>Server Name</label>
+              <input type="text" id="new-inst-name" placeholder="e.g. Ubuntu Web Server" />
+            </div>
+            <div class="input-group">
+              <label>Server IP Address</label>
+              <input type="text" id="new-inst-ip" placeholder="e.g. 20.104.5.123" />
+            </div>
+            <div class="input-group">
+              <label>Port</label>
+              <input type="text" id="new-inst-port" placeholder="8082" value="8082" />
+            </div>
+            <div class="modal-actions">
+              <button id="btn-delete-inst" class="secondary-btn" style="display:none; color: #ff4757; border-color: rgba(255,71,87,0.3); flex: 0.5;">Delete</button>
+              <button id="btn-cancel-add" class="secondary-btn">Cancel</button>
+              <button id="btn-save-inst" class="primary-btn flex-1">Save Profile</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- CONNECT MODAL -->
+        <div id="connect-modal" class="modal-overlay">
+          <div class="modal-content glass-panel">
+            <h2 id="connect-inst-name">Connect</h2>
+            <p class="subtitle" id="connect-inst-ip"></p>
+            <div class="input-group">
+              <label>Username</label>
+              <input type="text" id="connect-user" value="admin" />
+            </div>
+            <div class="input-group">
+              <label>Password</label>
+              <input type="password" id="connect-pass" />
+            </div>
+            <div class="modal-actions">
+              <button id="btn-cancel-connect" class="secondary-btn">Cancel</button>
+              <button id="btn-launch-inst" class="primary-btn flex-1">Launch</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div id="remote-view" class="view">
+        <div class="disconnected-badge">OFFLINE: Connection Lost</div>
+        
+        <div class="remote-layout">
+          <!-- Sidebar -->
+          <aside class="sidebar" id="sidebar">
+            <div class="sidebar-header">
+              <div class="sidebar-logo">NETMAN</div>
+              <button id="btn-close-sidebar" class="icon-btn mobile-only">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+              </button>
+            </div>
+            <div class="nav-menu">
+              <button class="nav-btn active" data-target="tab-system">
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect><line x1="8" y1="21" x2="16" y2="21"></line><line x1="12" y1="17" x2="12" y2="21"></line></svg>
+                System
+              </button>
+              <button class="nav-btn" data-target="tab-touchpad">
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 3h6v6l-6.5 6.5"></path><path d="M18 12l3 3"></path><rect x="3" y="3" width="18" height="18" rx="2"></rect><path d="M9 15l-3 3"></path></svg>
+                Touchpad
+              </button>
+              <button class="nav-btn" data-target="tab-media">
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><polygon points="10 8 16 12 10 16 10 8"></polygon></svg>
+                Media
+              </button>
+              <button class="nav-btn" data-target="tab-screen">
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect><line x1="12" y1="17" x2="12" y2="21"></line></svg>
+                Screen
+              </button>
+              <button class="nav-btn" data-target="tab-terminal">
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 17 10 11 4 5"></polyline><line x1="12" y1="19" x2="20" y2="19"></line></svg>
+                Terminal
+              </button>
+              <button class="nav-btn" data-target="tab-terminal-v2">
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 12h-4l-3 9L9 3l-3 9H2"></path></svg>
+                Terminal V2
+              </button>
+              <button class="nav-btn" data-target="tab-power">
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M18.36 6.64a9 9 0 1 1-12.73 0"></path><line x1="12" y1="2" x2="12" y2="12"></line></svg>
+                Power
+              </button>
+            </div>
+          </aside>
+
+          <!-- Sidebar Overlay (Mobile) -->
+          <div class="sidebar-overlay" id="sidebar-overlay"></div>
+
+          <!-- Main Content -->
+          <div class="main-content">
+            <header class="remote-header">
+              <div class="header-left">
+                <button id="btn-menu-toggle" class="icon-btn hamburger-btn" title="Open Menu">
+                  <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="12" x2="21" y2="12"></line><line x1="3" y1="6" x2="21" y2="6"></line><line x1="3" y1="18" x2="21" y2="18"></line></svg>
+                </button>
+                <button id="btn-back-menu" class="icon-btn" title="Back to Menu" style="display: none;">
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"></line><polyline points="12 19 5 12 12 5"></polyline></svg>
+                </button>
+                <h2 id="remote-title">NetMan Remote</h2>
+              </div>
+              <div class="header-right">
+                <button id="btn-screenshot" class="secondary-btn" title="Take Remote Screenshot">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 6px;"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path><circle cx="12" cy="13" r="4"></circle></svg>
+                  Screenshot
+                </button>
+                <div class="status-indicator"></div>
+              </div>
+            </header>
+
+            <div class="tab-content">
+              <!-- System Tab -->
+              <div id="tab-system" class="tab-pane glass-panel active">
+                <div class="system-dashboard">
+                    <div class="stat-grid">
+                        <div class="stat-card">
+                            <div class="stat-label">CPU Usage</div>
+                            <div class="stat-value" id="cpu-stat">0%</div>
+                            <div class="stat-bar-bg"><div id="cpu-bar" class="stat-bar" style="width: 0%"></div></div>
+                            <div id="cpu-temp" class="stat-detail">Temp: --°C</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-label">RAM Usage</div>
+                            <div class="stat-value" id="ram-stat">0 / 0 GB</div>
+                            <div class="stat-bar-bg"><div id="ram-bar" class="stat-bar" style="width: 0%"></div></div>
+                            <div id="ram-detail" class="stat-detail">0% used</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-label">Main Disk</div>
+                            <div class="stat-value" id="disk-stat">0%</div>
+                            <div class="stat-bar-bg"><div id="disk-bar" class="stat-bar" style="width: 0%"></div></div>
+                            <div id="disk-detail" class="stat-detail">Capacity: --</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-label">Network Speed</div>
+                            <div class="stat-value" id="net-rx">0 KB/s</div>
+                            <div class="stat-detail">↑ <span id="net-tx">0 KB/s</span></div>
+                        </div>
+                    </div>
+
+                    <div class="info-grid">
+                        <div class="info-card">
+                            <h3>System Information</h3>
+                            <div class="info-row"><span class="label">Hostname:</span> <span id="hostname-info">--</span></div>
+                            <div class="info-row"><span class="label">OS:</span> <span id="os-info">--</span></div>
+                            <div class="info-row"><span class="label">Local IP:</span> <span id="local-ip-info">--</span></div>
+                            <div class="info-row"><span class="label">Connection:</span> <span id="net-info">--</span></div>
+                            <div class="info-row"><span class="label">Internet:</span> <span id="internet-status" class="status-badge">--</span></div>
+                        </div>
+                        <div class="info-card">
+                            <h3>Graphics (GPU)</h3>
+                            <div id="gpu-list" class="gpu-list">Detecting...</div>
+                        </div>
+                    </div>
+                </div>
+              </div>
+
+              <!-- Touchpad Tab -->
+              <div id="tab-touchpad" class="tab-pane">
+                <div id="touchpad" class="touchpad glass-panel">
+                  <div class="touchpad-hint">Touchpad Surface</div>
+                </div>
+                <div class="mouse-actions">
+                  <button class="mouse-btn" id="btn-left-click">Left Click</button>
+                  <button class="mouse-btn" id="btn-right-click">Right Click</button>
+                </div>
+              </div>
+
+              <!-- Media Tab -->
+              <div id="tab-media" class="tab-pane glass-panel media-pane">
+                <div class="media-grid">
+                  <div class="media-section">
+                    <h3>Media Control</h3>
+                    <div class="media-controls">
+                      <button class="icon-btn media-key" data-key="MediaTrackPrevious">
+                        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M6 6h2v12H6zm3.5 6l8.5 6V6z"/></svg>
+                      </button>
+                      <button class="icon-btn media-key" data-key="MediaPlayPause">
+                        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+                      </button>
+                      <button class="icon-btn media-key" data-key="MediaTrackNext">
+                        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z"/></svg>
+                      </button>
+                      <button class="icon-btn media-key" id="btn-mute" data-key="AudioVolumeMute">
+                        <svg id="mute-icon" viewBox="0 0 24 24" fill="currentColor"><path d="M16.5 12c0-1.77-1.02-3.29-2.5-4.03v2.21l2.45 2.45c.03-.2.05-.41.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51C20.63 14.91 21 13.5 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3L3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06c1.38-.31 2.63-.95 3.69-1.81L19.73 21 21 19.73l-9-9L4.27 3zM12 4L9.91 6.09 12 8.18V4z"/></svg>
+                      </button>
+                    </div>
+                    
+                    <div id="media-track-info" class="media-track-info">
+                      <div id="media-title" class="media-title">No Media Playing</div>
+                      <div id="media-source" class="media-source"></div>
+                    </div>
+
+                    <div class="volume-control-group">
+                        <div class="slider-wrapper">
+                          <input type="range" id="vol-slider" min="0" max="100" value="50" class="vol-slider">
+                        </div>
+                        <div class="volume-info">
+                            Volume: <span id="vol-level">--%</span>
+                        </div>
+                    </div>
+                  </div>
+
+                  <div class="presentation-section">
+                    <h3>Presentation</h3>
+                    <div class="pres-controls-stack">
+                        <button class="primary-btn wide-btn" id="btn-prev-slide">
+                          <svg viewBox="0 0 24 24" fill="currentColor" width="20" height="20"><path d="M15.41 7.41L14 6l-6 6 6 6 1.41-1.41L10.83 12z"/></svg>
+                          Prev Slide
+                        </button>
+                        <button class="primary-btn wide-btn" id="btn-next-slide">
+                          Next Slide
+                          <svg viewBox="0 0 24 24" fill="currentColor" width="20" height="20"><path d="M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z"/></svg>
+                        </button>
+                    </div>
+                    <div class="pres-info">
+                        <p>PowerPoint, PDF, or Prezi.</p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Screen Share Tab -->
+              <div id="tab-screen" class="tab-pane glass-panel">
+                <div class="screen-container">
+                  <div id="screen-loading" class="screen-loading">Waiting for screen frames...</div>
+                  <img id="screen-img" src="" alt="Screen Share" />
+                </div>
+              </div>
+
+              <!-- Terminal Tab -->
+              <div id="tab-terminal" class="tab-pane glass-panel">
+                <div id="terminal-output" class="terminal-output"></div>
+                <div class="terminal-input-wrapper">
+                  <span class="terminal-prompt">$</span>
+                  <input type="text" id="terminal-input" class="terminal-input" autocomplete="off" spellcheck="false" placeholder="Execute command..." />
+                </div>
+              </div>
+
+              <!-- Terminal V2 Tab (xterm.js) -->
+              <div id="tab-terminal-v2" class="tab-pane glass-panel">
+                <div id="xterm-container" style="width: 100%; height: 100%; padding: 10px; box-sizing: border-box; background: #000; border-radius: 8px; overflow: hidden;"></div>
+              </div>
+
+              <div id="tab-power" class="tab-pane glass-panel">
+                <div id="power-windows" class="power-container" style="display: none;">
+                  <h3>Windows Power Controls</h3>
+                  <button class="power-btn primary-btn" data-action="win_shutdown">Shutdown Native</button>
+                  <button class="power-btn primary-btn" data-action="win_shutdown_update">Shutdown and Install Updates</button>
+                  <button class="power-btn secondary-btn" data-action="win_restart">Restart Native</button>
+                  <button class="power-btn secondary-btn" data-action="win_restart_update">Restart and Install Updates</button>
+                  <button class="power-btn" data-action="win_sleep">Sleep</button>
+                  <button class="power-btn" data-action="win_lock">Lock Workstation</button>
+                </div>
+                
+            </div>
+          </div>
+
+          <!-- Terminal Tab -->
+          <div id="tab-terminal" class="tab-pane glass-panel">
+            <div id="terminal-output" class="terminal-output"></div>
+            <div class="terminal-input-wrapper">
+              <span class="terminal-prompt">$</span>
+              <input type="text" id="terminal-input" class="terminal-input" autocomplete="off" spellcheck="false" placeholder="Execute command..." />
+            </div>
+          </div>
+
+          <!-- Terminal V2 Tab (xterm.js) -->
+          <div id="tab-terminal-v2" class="tab-pane glass-panel">
+            <div id="xterm-container" style="width: 100%; height: 100%; padding: 10px; box-sizing: border-box; background: #000; border-radius: 8px; overflow: hidden;"></div>
+          </div>
+
+          <div id="tab-power" class="tab-pane glass-panel">
+            <div id="power-windows" class="power-container" style="display: none;">
+              <h3>Windows Power Controls</h3>
+              <button class="power-btn primary-btn" data-action="win_shutdown">Shutdown Native</button>
+              <button class="power-btn primary-btn" data-action="win_shutdown_update">Shutdown and Install Updates</button>
+              <button class="power-btn secondary-btn" data-action="win_restart">Restart Native</button>
+              <button class="power-btn secondary-btn" data-action="win_restart_update">Restart and Install Updates</button>
+              <button class="power-btn" data-action="win_sleep">Sleep</button>
+              <button class="power-btn" data-action="win_lock">Lock Workstation</button>
+            </div>
+            
+            <div id="power-linux" class="power-container" style="display: none;">
+              <h3>Linux Power Controls</h3>
+              <button class="power-btn primary-btn" data-action="linux_poweroff">Power Off</button>
+              <button class="power-btn secondary-btn" data-action="linux_reboot">Reboot</button>
+              <button class="power-btn" data-action="linux_suspend">Suspend / Sleep</button>
+              <button class="power-btn" data-action="linux_lock">Lock Session</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ALERT MODAL -->
+    <div id="alert-modal" class="modal-overlay">
+      <div class="modal-content glass-panel alert-modal">
+        <h2 id="alert-title">Notification</h2>
+        <p id="alert-message"></p>
+        <div class="modal-actions">
+          <button id="btn-alert-ok" class="primary-btn flex-1">OK</button>
+        </div>
+      </div>
+    </div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

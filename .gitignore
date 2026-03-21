@@ -1,0 +1,27 @@
+# Rust
+**/target/
+**/*.rs.bk
+
+# Node.js
+**/node_modules/
+**/dist/
+**/build/
+.npm
+npm-debug.log*
+
+# Tauri
+client/src-tauri/target/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Project specific
+.env*
+! .github/workflows/
