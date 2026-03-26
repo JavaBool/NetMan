@@ -47,6 +47,7 @@ enum ServerMessage {
         token: Option<String>,
         message: String,
         os: Option<String>,
+        capabilities: Vec<String>,
     },
     ScreenFrame {
         frame_base64: String,
@@ -56,6 +57,9 @@ enum ServerMessage {
     },
     TerminalV2Output {
         output: String,
+    },
+    TerminalCwd {
+        path: String,
     },
     SystemInfo {
         os_name: String,
@@ -379,7 +383,7 @@ async fn handle_connection(stream: TcpStream, addr: std::net::SocketAddr, state:
                     Ok(ClientMessage::Auth { username, password }) => {
                         let mut state_lock = state.lock().await;
                         if username != "admin" {
-                            let _ = sender.send(Message::Text(tokio_tungstenite::tungstenite::Utf8Bytes::from(serde_json::to_string(&ServerMessage::AuthResult { success: false, token: None, message: "Invalid username".into(), os: None }).unwrap()))).await;
+                            let _ = sender.send(Message::Text(tokio_tungstenite::tungstenite::Utf8Bytes::from(serde_json::to_string(&ServerMessage::AuthResult { success: false, token: None, message: "Invalid username".into(), os: None, capabilities: vec![] }).unwrap()))).await;
                             continue;
                         }
 
@@ -391,9 +395,10 @@ async fn handle_connection(stream: TcpStream, addr: std::net::SocketAddr, state:
                             state_lock.active_tokens.insert(token.clone());
                             session_token = Some(token.clone());
                             let os_name = std::env::consts::OS.to_string();
-                            let _ = sender.send(Message::Text(tokio_tungstenite::tungstenite::Utf8Bytes::from(serde_json::to_string(&ServerMessage::AuthResult { success: true, token: Some(token), message: "OK".into(), os: Some(os_name) }).unwrap()))).await;
+                            let capabilities = get_server_capabilities();
+                            let _ = sender.send(Message::Text(tokio_tungstenite::tungstenite::Utf8Bytes::from(serde_json::to_string(&ServerMessage::AuthResult { success: true, token: Some(token), message: "OK".into(), os: Some(os_name), capabilities }).unwrap()))).await;
                         } else {
-                            let _ = sender.send(Message::Text(tokio_tungstenite::tungstenite::Utf8Bytes::from(serde_json::to_string(&ServerMessage::AuthResult { success: false, token: None, message: "Invalid password".into(), os: None }).unwrap()))).await;
+                            let _ = sender.send(Message::Text(tokio_tungstenite::tungstenite::Utf8Bytes::from(serde_json::to_string(&ServerMessage::AuthResult { success: false, token: None, message: "Invalid password".into(), os: None, capabilities: vec![] }).unwrap()))).await;
                         }
                     }
                     Ok(ClientMessage::MouseMove { token, dx, dy }) => {
@@ -478,6 +483,11 @@ async fn handle_connection(stream: TcpStream, addr: std::net::SocketAddr, state:
                                 let mut stdout = child.stdout.take().unwrap();
                                 let mut stderr = child.stderr.take().unwrap();
                                 
+                                // Send initial CWD
+                                if let Ok(cwd) = std::env::current_dir() {
+                                    let _ = msg_tx.send(ServerMessage::TerminalCwd { path: cwd.to_string_lossy().into_owned() });
+                                }
+
                                 let (in_tx, mut in_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
                                 term_in_tx = Some(in_tx);
                                 
@@ -541,6 +551,11 @@ async fn handle_connection(stream: TcpStream, addr: std::net::SocketAddr, state:
                                         let (in_tx, mut in_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
                                         term_v2_in_tx = Some(in_tx);
                                         
+                                        // Send initial CWD
+                                        if let Ok(cwd) = std::env::current_dir() {
+                                            let _ = msg_tx.send(ServerMessage::TerminalCwd { path: cwd.to_string_lossy().into_owned() });
+                                        }
+
                                         let out_tx = term_v2_out_tx.clone();
                                         std::thread::spawn(move || {
                                             use std::io::Read;
@@ -819,6 +834,33 @@ async fn get_audio_state() -> (bool, u8, Option<String>) {
         return (mute, vol, media);
     }
     (false, 0, None)
+}
+
+fn get_server_capabilities() -> Vec<String> {
+    let mut caps = vec!["terminal".to_string(), "power".to_string(), "system".to_string()];
+    
+    if cfg!(target_os = "windows") {
+        caps.push("screen_share".to_string());
+        caps.push("touchpad".to_string());
+        caps.push("media".to_string());
+        caps.push("presentation".to_string());
+        caps.push("screenshot".to_string());
+    } else {
+        // Linux / WSL Check
+        let is_wsl = std::env::var("WSL_DISTRO_NAME").is_ok() || 
+                     std::fs::read_to_string("/proc/version").map(|s| s.to_lowercase().contains("microsoft")).unwrap_or(false);
+        
+        let has_display = !is_wsl && (std::env::var("DISPLAY").is_ok() || std::env::var("WAYLAND_DISPLAY").is_ok());
+        
+        if has_display {
+            caps.push("screen_share".to_string());
+            caps.push("touchpad".to_string());
+            caps.push("media".to_string());
+            caps.push("presentation".to_string());
+            caps.push("screenshot".to_string());
+        }
+    }
+    caps
 }
 
 async fn get_platform_system_details() -> (Vec<String>, String, bool) {
