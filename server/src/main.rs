@@ -18,6 +18,9 @@ use uuid::Uuid;
 use xcap::Monitor;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
+
 #[derive(Deserialize, Debug)]
 #[serde(tag = "type")]
 enum ClientMessage {
@@ -670,7 +673,8 @@ async fn handle_connection(stream: TcpStream, addr: std::net::SocketAddr, state:
                         let state_lock = state.lock().await;
                         if state_lock.active_tokens.contains(&token) {
                             println!("[{}] Request: SetVolume {}%", addr, volume);
-                            if cfg!(target_os = "windows") {
+                            #[cfg(target_os = "windows")]
+                            {
                                 let cmd = format!("Import-Module AudioDeviceCmdlets -ErrorAction SilentlyContinue; Set-AudioDevice -PlaybackVolume {}", volume);
                                 let tx_c = msg_tx.clone();
                                 tokio::spawn(async move {
@@ -681,7 +685,9 @@ async fn handle_connection(stream: TcpStream, addr: std::net::SocketAddr, state:
                                     // Immediate broadcast after set
                                     let _ = tx_c.send(ServerMessage::AudioState { mute: false, volume, media_title: None });
                                 });
-                            } else {
+                            }
+                            #[cfg(target_os = "linux")]
+                            {
                                 let tx_c = msg_tx.clone();
                                 tokio::spawn(async move {
                                     let _ = tokio::process::Command::new("amixer")
@@ -690,7 +696,8 @@ async fn handle_connection(stream: TcpStream, addr: std::net::SocketAddr, state:
                                     let _ = tx_c.send(ServerMessage::AudioState { mute: false, volume, media_title: None });
                                 });
                             }
-                        } else {
+                        }
+ else {
                             println!("[{}] Request: SetVolume - FAILED (Invalid Token)", addr);
                         }
                     }
