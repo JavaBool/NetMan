@@ -18,9 +18,6 @@ use uuid::Uuid;
 use xcap::Monitor;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 
-#[cfg(target_os = "windows")]
-use std::os::windows::process::CommandExt;
-
 #[derive(Deserialize, Debug)]
 #[serde(tag = "type")]
 enum ClientMessage {
@@ -700,30 +697,6 @@ async fn handle_connection(stream: TcpStream, addr: std::net::SocketAddr, state:
  else {
                             println!("[{}] Request: SetVolume - FAILED (Invalid Token)", addr);
                         }
-                    }
-                    Ok(ClientMessage::PowerAction { token, action }) => {
-                        if Some(token) == session_token {
-                            let _ = match action.as_str() {
-                                "win_shutdown" => tokio::process::Command::new("shutdown").args(["/s", "/t", "0", "/f"]).kill_on_drop(true).spawn(),
-                                "win_shutdown_update" => {
-                                    let _ = tokio::process::Command::new("usoclient").arg("StartInstall").kill_on_drop(true).spawn();
-                                    tokio::process::Command::new("shutdown").args(["/g", "/t", "0", "/f"]).kill_on_drop(true).spawn()
-                                },
-                                "win_restart" => tokio::process::Command::new("shutdown").args(["/r", "/t", "0", "/f"]).kill_on_drop(true).spawn(),
-                                "win_restart_update" => {
-                                    let _ = tokio::process::Command::new("usoclient").arg("StartInstall").kill_on_drop(true).spawn();
-                                    tokio::process::Command::new("shutdown").args(["/g", "/t", "0", "/f"]).kill_on_drop(true).spawn()
-                                },
-                                "win_lock" => tokio::process::Command::new("rundll32.exe").args(["user32.dll,LockWorkStation"]).kill_on_drop(true).spawn(),
-                                "win_sleep" => tokio::process::Command::new("rundll32.exe").args(["powrprof.dll,SetSuspendState", "0,1,0"]).kill_on_drop(true).spawn(),
-                                "linux_poweroff" => tokio::process::Command::new("systemctl").arg("poweroff").kill_on_drop(true).spawn(),
-                                "linux_reboot" => tokio::process::Command::new("systemctl").arg("reboot").kill_on_drop(true).spawn(),
-                                "linux_suspend" => tokio::process::Command::new("systemctl").arg("suspend").kill_on_drop(true).spawn(),
-                                "linux_lock" => tokio::process::Command::new("loginctl").arg("lock-session").kill_on_drop(true).spawn(),
-                                _ => Ok(tokio::process::Command::new("echo").kill_on_drop(true).spawn().unwrap()),
-                            };
-                        }
-                    }
                     Err(_) => {}
                 }
             }

@@ -43,8 +43,8 @@ jobs:
         with:
           name: server-${{ matrix.target }}
           path: |
-            server/target/${{ matrix.target }}/release/server.exe
-            server/target/${{ matrix.target }}/release/server
+            server/target/${{ matrix.target }}/release/netman-server.exe
+            server/target/${{ matrix.target }}/release/netman-server
 
   build-client-desktop:
     permissions:
@@ -75,7 +75,7 @@ jobs:
         run: npm install
         
       - name: Build Tauri Desktop Client
-        uses: tauri-apps/tauri-action@v0
+        uses: tauri-apps/tauri-action@v0.5.15
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
@@ -85,6 +85,12 @@ jobs:
           releaseBody: "Automated Release Builds"
           releaseDraft: true
           prerelease: false
+
+      - name: Upload Desktop Client Installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: client-desktop-${{ matrix.platform }}
+          path: client/src-tauri/target/release/bundle/
 
   build-client-android:
     runs-on: ubuntu-22.04
