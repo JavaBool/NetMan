@@ -395,6 +395,32 @@ function initRemoteView(ip_p?: string, user_p?: string, pass_p?: string, name_p?
             } else if (data.os === 'linux') {
               document.getElementById('power-linux')!.style.display = 'flex';
             }
+
+            // Apply Server Capabilities
+            if (data.capabilities) {
+              const caps = data.capabilities as string[];
+              const navMap: {[key: string]: string} = {
+                'touchpad': 'nav-touchpad',
+                'media': 'nav-media',
+                'screen_share': 'nav-screen',
+                'presentation': 'nav-presentation', // Note: presentation is inside media tab but we can hide the section
+                'screenshot': 'btn-screenshot'
+              };
+
+              Object.entries(navMap).forEach(([cap, id]) => {
+                const el = document.getElementById(id);
+                if (el) {
+                  el.style.display = caps.includes(cap) ? 'flex' : 'none';
+                }
+              });
+
+              // Also handle the presentation section specifically since it's inside media
+              const presSection = document.querySelector('.presentation-section') as HTMLElement;
+              if (presSection) {
+                presSection.style.display = caps.includes('presentation') ? 'block' : 'none';
+              }
+            }
+
             // Activate default tab
             document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
             document.querySelectorAll('.tab-pane').forEach(t => t.classList.remove('active'));
@@ -428,6 +454,12 @@ function initRemoteView(ip_p?: string, user_p?: string, pass_p?: string, name_p?
           terminalOutput.scrollTop = terminalOutput.scrollHeight;
         } else if (data.type === 'TerminalV2Output') {
           xterm?.write(data.output);
+        } else if (data.type === 'TerminalCwd') {
+          const cwdEl = document.getElementById('terminal-cwd');
+          if (cwdEl) {
+            cwdEl.textContent = data.path;
+            cwdEl.style.display = 'block';
+          }
         } else if (data.type === 'AudioState') {
           console.log(`[CLIENT] Audio State Received: Mute=${data.mute}, Vol=${data.volume}%, Media=${data.media_title}`);
           const volLevel = document.getElementById('vol-level');
@@ -533,9 +565,9 @@ function initRemoteView(ip_p?: string, user_p?: string, pass_p?: string, name_p?
             port: port_v,
             imageBase64: data.image_base64
           }).then((path: any) => {
-             showAlert(`Screenshot saved to Pictures/NetMan/${name}\nFile: ${path.split(/[\\/]/).pop()}`, 'Screenshot Saved');
+             showAlert(`Screenshot captured and opened!\nFolder: Pictures/NetMan/${name}\nFile: ${path.split(/[\\/]/).pop()}`, 'Screenshot Saved');
           }).catch((err: any) => {
-             showAlert(`Failed to save screenshot: ${err}`, 'Error');
+             showAlert(`Failed to save or open screenshot: ${err}`, 'Error');
           });
         }
       }

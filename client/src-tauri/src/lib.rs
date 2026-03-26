@@ -2,6 +2,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use chrono::Local;
 use std::fs;
 use tauri::Manager;
+use tauri_plugin_opener::OpenerExt;
 
 #[tauri::command]
 fn save_screenshot(
@@ -27,7 +28,11 @@ fn save_screenshot(
     let decoded = STANDARD.decode(image_base64).map_err(|e| e.to_string())?;
     fs::write(&path, decoded).map_err(|e| e.to_string())?;
     
-    Ok(path.to_string_lossy().to_string())
+    // Open the screenshot in the default system photo viewer
+    let path_str = path.to_string_lossy().to_string();
+    let _ = app.opener().open_path(&path_str, None::<String>);
+
+    Ok(path_str)
 }
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
