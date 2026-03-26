@@ -693,10 +693,10 @@ async fn handle_connection(stream: TcpStream, addr: std::net::SocketAddr, state:
                                     let _ = tx_c.send(ServerMessage::AudioState { mute: false, volume, media_title: None });
                                 });
                             }
-                        }
- else {
+                        } else {
                             println!("[{}] Request: SetVolume - FAILED (Invalid Token)", addr);
                         }
+                    }
                     Err(_) => {}
                 }
             }
