@@ -20,3 +20,4 @@ tokio-tungstenite = "0.29.0"
 uuid = { version = "1.22.0", features = ["v4"] }
 xcap = "0.9.1"
 sysinfo = "0.33.1"
+arboard = "3.4.1"

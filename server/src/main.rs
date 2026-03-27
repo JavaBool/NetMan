@@ -18,6 +18,20 @@ use uuid::Uuid;
 use xcap::Monitor;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 
+#[derive(Serialize, Deserialize, Debug)]
+pub struct ProcessItem {
+    pub pid: u32,
+    pub name: String,
+    pub cpu: f32,
+    pub mem_mb: u64,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct ServiceItem {
+    pub name: String,
+    pub status: String,
+}
+
 #[derive(Deserialize, Debug)]
 #[serde(tag = "type")]
 enum ClientMessage {
@@ -25,8 +39,11 @@ enum ClientMessage {
     MouseMove { token: String, dx: i32, dy: i32 },
     MouseClick { token: String, button: String },
     KeyPress { token: String, key: String },
+    SetVolume { token: String, volume: u8 },
+    PowerAction { token: String, action: String },
     StartScreenShare { token: String },
     StopScreenShare { token: String },
+    TakeScreenshot { token: String },
     StartTerminal { token: String },
     StopTerminal { _token: String },
     TerminalInput { token: String, input: String },
@@ -34,9 +51,12 @@ enum ClientMessage {
     StopTerminalV2 { _token: String },
     TerminalV2Input { token: String, input: String },
     TerminalV2Resize { token: String, rows: u16, cols: u16 },
-    PowerAction { token: String, action: String },
-    TakeScreenshot { token: String },
-    SetVolume { token: String, volume: u8 },
+    ListProcesses { token: String },
+    KillProcess { token: String, pid: u32 },
+    ListServices { token: String },
+    ToggleService { token: String, name: String, action: String },
+    GetClipboard { token: String },
+    SetClipboard { token: String, text: String },
 }
 
 #[derive(Serialize, Debug)]
@@ -84,6 +104,15 @@ enum ServerMessage {
     },
     Screenshot {
         image_base64: String,
+    },
+    ProcessList {
+        processes: Vec<ProcessItem>,
+    },
+    ServiceList {
+        services: Vec<ServiceItem>,
+    },
+    ClipboardContents {
+        text: String,
     },
 }
 
@@ -626,15 +655,22 @@ async fn handle_connection(stream: TcpStream, addr: std::net::SocketAddr, state:
                                 let cmd = match action.as_str() {
                                     "win_shutdown" | "win_shutdown_update" => Some("shutdown /s /t 0"),
                                     "win_restart" | "win_restart_update" => Some("shutdown /r /t 0"),
-                                    "win_sleep" => Some("rundll32.exe powrprof.dll,SetSuspendState 0,1,0"),
+                                    "win_sleep" => Some("powershell -Command \"Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.Application]::SetSuspendState('Suspend', $false, $false)\""),
                                     "win_lock" => Some("rundll32.exe user32.dll,LockWorkStation"),
                                     _ => None,
                                 };
                                 
                                 if let Some(c) = cmd {
                                     tokio::spawn(async move {
-                                        let _ = tokio::process::Command::new("cmd")
-                                            .args(&["/C", c])
+                                        let base_cmd = if c.starts_with("powershell") { "powershell" } else { "cmd" };
+                                        let args = if base_cmd == "powershell" {
+                                            vec!["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &c["powershell -Command ".len()..]]
+                                        } else {
+                                            vec!["/C", c]
+                                        };
+                                        
+                                        let _ = tokio::process::Command::new(base_cmd)
+                                            .args(&args)
                                             .creation_flags(0x08000000)
                                             .status().await;
                                     });
@@ -710,6 +746,124 @@ async fn handle_connection(stream: TcpStream, addr: std::net::SocketAddr, state:
                             }
                         } else {
                             println!("[{}] Request: SetVolume - FAILED (Invalid Token)", addr);
+                        }
+                    }
+                    Ok(ClientMessage::ListProcesses { token }) => {
+                        let state_lock = state.lock().await;
+                        if state_lock.active_tokens.contains(&token) {
+                            let mut sys = sysinfo::System::new();
+                            sys.refresh_all();
+                            let processes: Vec<ProcessItem> = sys.processes().values().map(|p| {
+                                ProcessItem {
+                                    pid: p.pid().as_u32(),
+                                    name: p.name().to_string_lossy().into_owned(),
+                                    cpu: p.cpu_usage(),
+                                    mem_mb: p.memory() / 1_048_576,
+                                }
+                            }).collect();
+                            let response = ServerMessage::ProcessList { processes };
+                            let _ = sender.send(Message::Text(tokio_tungstenite::tungstenite::Utf8Bytes::from(serde_json::to_string(&response).unwrap()))).await;
+                        }
+                    }
+                    Ok(ClientMessage::KillProcess { token, pid }) => {
+                        let state_lock = state.lock().await;
+                        if state_lock.active_tokens.contains(&token) {
+                            let mut sys = sysinfo::System::new();
+                            sys.refresh_all();
+                            if let Some(p) = sys.process(sysinfo::Pid::from_u32(pid)) {
+                                    p.kill();
+                                    println!("[{}] Killed process PID {}", addr, pid);
+                                }
+                            }
+                        }
+                    Ok(ClientMessage::ListServices { token }) => {
+                        let state_lock = state.lock().await;
+                        if state_lock.active_tokens.contains(&token) {
+                            let mut services = Vec::new();
+                            #[cfg(target_os = "windows")]
+                            {
+                                let output = tokio::process::Command::new("powershell")
+                                    .args(["-NoProfile", "-Command", "Get-Service | ForEach-Object { $_.Name + '|' + $_.Status }"])
+                                    .output().await;
+                                if let Ok(out) = output {
+                                    let s = String::from_utf8_lossy(&out.stdout);
+                                    for line in s.lines() {
+                                        let parts: Vec<&str> = line.split('|').collect();
+                                        if parts.len() == 2 {
+                                            services.push(ServiceItem { name: parts[0].to_string(), status: parts[1].to_string() });
+                                        }
+                                    }
+                                }
+                            }
+                            #[cfg(target_os = "linux")]
+                            {
+                                let output = tokio::process::Command::new("systemctl")
+                                    .args(["list-units", "--type=service", "--all", "--no-legend"])
+                                    .output().await;
+                                if let Ok(out) = output {
+                                    let s = String::from_utf8_lossy(&out.stdout);
+                                    for line in s.lines() {
+                                        let parts: Vec<&str> = line.split_whitespace().collect();
+                                        if parts.len() >= 4 {
+                                            services.push(ServiceItem { name: parts[0].to_string(), status: parts[3].to_string() });
+                                        }
+                                    }
+                                }
+                            }
+                            let response = ServerMessage::ServiceList { services };
+                            let _ = sender.send(Message::Text(tokio_tungstenite::tungstenite::Utf8Bytes::from(serde_json::to_string(&response).unwrap()))).await;
+                        }
+                    }
+                    Ok(ClientMessage::ToggleService { token, name, action }) => {
+                        let state_lock = state.lock().await;
+                        if state_lock.active_tokens.contains(&token) {
+                            #[cfg(target_os = "windows")]
+                            {
+                                let cmd = match action.as_str() {
+                                    "start" => "Start-Service",
+                                    "stop" => "Stop-Service",
+                                    "restart" => "Restart-Service",
+                                    _ => "",
+                                };
+                                if !cmd.is_empty() {
+                                    let _ = tokio::process::Command::new("powershell")
+                                        .args(["-NoProfile", "-Command", &format!("{} -Name '{}'", cmd, name)])
+                                        .status().await;
+                                }
+                            }
+                            #[cfg(target_os = "linux")]
+                            {
+                                let cmd = match action.as_str() {
+                                    "start" | "stop" | "restart" => action.as_str(),
+                                    _ => "",
+                                };
+                                if !cmd.is_empty() {
+                                    let _ = tokio::process::Command::new("systemctl")
+                                        .args([cmd, &name])
+                                        .status().await;
+                                }
+                            }
+                        }
+                    }
+                    Ok(ClientMessage::GetClipboard { token }) => {
+                        let state_lock = state.lock().await;
+                        if state_lock.active_tokens.contains(&token) {
+                            println!("[{}] Request: GetClipboard", addr);
+                            if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                                if let Ok(text) = clipboard.get_text() {
+                                    let response = ServerMessage::ClipboardContents { text };
+                                    let _ = sender.send(Message::Text(tokio_tungstenite::tungstenite::Utf8Bytes::from(serde_json::to_string(&response).unwrap()))).await;
+                                }
+                            }
+                        }
+                    }
+                    Ok(ClientMessage::SetClipboard { token, text }) => {
+                        let state_lock = state.lock().await;
+                        if state_lock.active_tokens.contains(&token) {
+                            println!("[{}] Request: SetClipboard ({} bytes)", addr, text.len());
+                            if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                                let _ = clipboard.set_text(text);
+                            }
                         }
                     }
                     Err(_) => {}

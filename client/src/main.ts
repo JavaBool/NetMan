@@ -26,6 +26,7 @@ function showAlert(message: string, title: string = 'Notification', onOk?: () =>
     if (onOk) onOk();
   };
   modal.classList.add('active');
+  console.log(`[ALERT] Showing: ${title} - ${message}`);
 }
 
 function showConfirm(message: string, onConfirm: () => void, title: string = 'Confirm Action') {
@@ -284,6 +285,14 @@ function initRemoteView(ip_p?: string, user_p?: string, pass_p?: string, name_p?
   let isTerminalV2Started = false;
   let isDisconnected = false;
   let isUserAdjustingVolume = false;
+  let rawProcesses: any[] = [];
+  let rawServices: any[] = [];
+  let processSortCol = 'cpu';
+  let processSortDir: 'asc' | 'desc' = 'desc';
+  let serviceSortCol = 'name';
+  let serviceSortDir: 'asc' | 'desc' = 'asc';
+  let processFilter = 'all';
+  let serviceFilter = 'all';
   
   // Navigation
   document.querySelectorAll('.nav-btn').forEach(btn => {
@@ -325,6 +334,66 @@ function initRemoteView(ip_p?: string, user_p?: string, pass_p?: string, name_p?
         setTimeout(() => fitAddon?.fit(), 50);
       } else if (targetId === 'tab-terminal-v2') {
         setTimeout(() => fitAddon?.fit(), 50);
+      }
+
+      if (targetId === 'tab-processes') {
+        sendCommand({ type: 'ListProcesses' });
+      }
+      if (targetId === 'tab-services') {
+        sendCommand({ type: 'ListServices' });
+      }
+    });
+  });
+
+  // Refresh Buttons
+  document.getElementById('btn-refresh-processes')?.addEventListener('click', () => sendCommand({ type: 'ListProcesses' }));
+  document.getElementById('btn-refresh-services')?.addEventListener('click', () => sendCommand({ type: 'ListServices' }));
+
+  // Search & Filter Inputs
+  document.getElementById('process-search')?.addEventListener('input', (e) => {
+    renderProcessList(rawProcesses, (e.target as HTMLInputElement).value.toLowerCase());
+  });
+
+  document.getElementById('service-search')?.addEventListener('input', (e) => {
+    renderServiceList(rawServices, (e.target as HTMLInputElement).value.toLowerCase());
+  });
+
+  document.getElementById('process-filter')?.addEventListener('change', (e) => {
+    processFilter = (e.target as HTMLSelectElement).value;
+    const search = (document.getElementById('process-search') as HTMLInputElement).value.toLowerCase();
+    renderProcessList(rawProcesses, search);
+  });
+
+  document.getElementById('service-filter')?.addEventListener('change', (e) => {
+    serviceFilter = (e.target as HTMLSelectElement).value;
+    const search = (document.getElementById('service-search') as HTMLInputElement).value.toLowerCase();
+    renderServiceList(rawServices, search);
+  });
+
+  // Sorting Listeners
+  document.querySelectorAll('th.sortable').forEach(th => {
+    th.addEventListener('click', () => {
+      const col = th.getAttribute('data-sort')!;
+      const table = th.getAttribute('data-table')!;
+      
+      if (table === 'process') {
+        if (processSortCol === col) {
+          processSortDir = processSortDir === 'asc' ? 'desc' : 'asc';
+        } else {
+          processSortCol = col;
+          processSortDir = 'desc'; // Default to desc for new columns (often more useful)
+        }
+        const search = (document.getElementById('process-search') as HTMLInputElement).value.toLowerCase();
+        renderProcessList(rawProcesses, search);
+      } else {
+        if (serviceSortCol === col) {
+          serviceSortDir = serviceSortDir === 'asc' ? 'desc' : 'asc';
+        } else {
+          serviceSortCol = col;
+          serviceSortDir = 'asc'; // Default to asc for services (alphabetical)
+        }
+        const search = (document.getElementById('service-search') as HTMLInputElement).value.toLowerCase();
+        renderServiceList(rawServices, search);
       }
     });
   });
@@ -436,6 +505,10 @@ function initRemoteView(ip_p?: string, user_p?: string, pass_p?: string, name_p?
                 }
             });
           }
+        } else if (data.type === 'ProcessList') {
+          renderProcessList(data.processes);
+        } else if (data.type === 'ServiceList') {
+          renderServiceList(data.services);
         } else if (data.type === 'ScreenFrame') {
           const screenLoading = document.getElementById('screen-loading')!;
           const screenImg = document.getElementById('screen-img') as HTMLImageElement;
@@ -569,6 +642,13 @@ function initRemoteView(ip_p?: string, user_p?: string, pass_p?: string, name_p?
           }).catch((err: any) => {
              showAlert(`Failed to save or open screenshot: ${err}`, 'Error');
           });
+        } else if (data.type === 'ClipboardContents') {
+           const text = data.text;
+           navigator.clipboard.writeText(text).then(() => {
+              showAlert('Remote clipboard fetched and copied to local!', 'Clipboard Sync');
+           }).catch(err => {
+              showAlert(`Failed to copy to local clipboard: ${err}`, 'Error');
+           });
         }
       }
     };
@@ -663,8 +743,36 @@ function initRemoteView(ip_p?: string, user_p?: string, pass_p?: string, name_p?
     btnScreenshot.onclick = () => {
       if (isDisconnected) return;
       btnScreenshot.disabled = true;
-      btnScreenshot.textContent = 'Capturing...';
+      btnScreenshot.textContent = 'Capture...';
       sendCommand({ type: 'TakeScreenshot' });
+    };
+  }
+
+  // Clipboard Actions
+  const btnFetch = document.getElementById('btn-fetch-clipboard');
+  const btnPush = document.getElementById('btn-push-clipboard');
+
+  if (btnFetch) {
+    btnFetch.onclick = () => {
+      if (isDisconnected) return;
+      sendCommand({ type: 'GetClipboard' });
+    };
+  }
+
+  if (btnPush) {
+    btnPush.onclick = async () => {
+      if (isDisconnected) return;
+      try {
+        const text = await navigator.clipboard.readText();
+        if (text) {
+          sendCommand({ type: 'SetClipboard', text });
+          showAlert('Local clipboard pushed to remote host!', 'Clipboard Sync');
+        } else {
+          showAlert('Local clipboard is empty.', 'Clipboard Sync');
+        }
+      } catch (err) {
+        showAlert(`Failed to read local clipboard: ${err}\nNote: Browser may require focus or permission.`, 'Error');
+      }
     };
   }
 
@@ -747,4 +855,115 @@ function initRemoteView(ip_p?: string, user_p?: string, pass_p?: string, name_p?
         }
     }, 100);
   }
+
+  // --- Process & Service Rendering ---
+  function renderProcessList(processes: any[], search: string = '') {
+    rawProcesses = processes;
+    const list = document.getElementById('process-list');
+    if (!list) return;
+
+    // 1. Filter
+    let filtered = search 
+      ? processes.filter(p => p.pid.toString().includes(search) || p.name.toLowerCase().includes(search))
+      : processes;
+
+    if (processFilter === 'high-cpu') filtered = filtered.filter(p => p.cpu > 1.0);
+    if (processFilter === 'high-mem') filtered = filtered.filter(p => p.mem_mb > 100);
+
+    // 2. Sort
+    filtered.sort((a, b) => {
+      let vA = a[processSortCol];
+      let vB = b[processSortCol];
+      if (typeof vA === 'string') {
+        vA = vA.toLowerCase();
+        vB = vB.toLowerCase();
+      }
+      if (vA < vB) return processSortDir === 'asc' ? -1 : 1;
+      if (vA > vB) return processSortDir === 'asc' ? 1 : -1;
+      return 0;
+    });
+
+    // 3. Update UI Sort Indicators
+    document.querySelectorAll('[data-table="process"]').forEach(th => {
+      th.classList.remove('sort-asc', 'sort-desc');
+      if (th.getAttribute('data-sort') === processSortCol) {
+        th.classList.add(processSortDir === 'asc' ? 'sort-asc' : 'sort-desc');
+      }
+    });
+
+    list.innerHTML = filtered.map(p => `
+      <tr>
+        <td>${p.pid}</td>
+        <td class="text-truncate" style="max-width: 150px;" title="${p.name}">${p.name}</td>
+        <td>${p.cpu.toFixed(1)}%</td>
+        <td>${p.mem_mb} MB</td>
+        <td><button class="kill-btn" onclick="killProcess(${p.pid})">Kill</button></td>
+      </tr>
+    `).join('');
+  }
+
+  function renderServiceList(services: any[], search: string = '') {
+    rawServices = services;
+    const list = document.getElementById('service-list');
+    if (!list) return;
+
+    // 1. Filter
+    let filtered = search
+      ? services.filter(s => s.name.toLowerCase().includes(search))
+      : services;
+
+    if (serviceFilter === 'running') filtered = filtered.filter(s => s.status.toLowerCase().includes('running'));
+    if (serviceFilter === 'stopped') filtered = filtered.filter(s => !s.status.toLowerCase().includes('running'));
+
+    // 2. Sort
+    filtered.sort((a, b) => {
+      let vA = a[serviceSortCol];
+      let vB = b[serviceSortCol];
+      if (typeof vA === 'string') {
+        vA = vA.toLowerCase();
+        vB = vB.toLowerCase();
+      }
+      if (vA < vB) return serviceSortDir === 'asc' ? -1 : 1;
+      if (vA > vB) return serviceSortDir === 'asc' ? 1 : -1;
+      return 0;
+    });
+
+    // 3. Update UI Sort Indicators
+    document.querySelectorAll('[data-table="service"]').forEach(th => {
+      th.classList.remove('sort-asc', 'sort-desc');
+      if (th.getAttribute('data-sort') === serviceSortCol) {
+        th.classList.add(serviceSortDir === 'asc' ? 'sort-asc' : 'sort-desc');
+      }
+    });
+
+    list.innerHTML = filtered.map(s => {
+      const statusClass = s.status.toLowerCase().includes('running') ? 'running' : 'stopped';
+      return `
+        <tr>
+          <td class="text-truncate" style="max-width: 180px;" title="${s.name}">${s.name}</td>
+          <td><span class="status-badge ${statusClass}">${s.status}</span></td>
+          <td>
+            <div class="svc-actions">
+              <button class="svc-btn" onclick="toggleService('${s.name}', 'start')">Start</button>
+              <button class="svc-btn" onclick="toggleService('${s.name}', 'stop')">Stop</button>
+              <button class="svc-btn" onclick="toggleService('${s.name}', 'restart')">Restart</button>
+            </div>
+          </td>
+        </tr>
+      `;
+    }).join('');
+  }
+
+  // Expose actions to global scope for HTML onclick
+  (window as any).killProcess = (pid: number) => {
+    showConfirm(`Are you sure you want to kill process ${pid}?`, () => {
+      sendCommand({ type: 'KillProcess', pid });
+      setTimeout(() => sendCommand({ type: 'ListProcesses' }), 500);
+    }, 'Kill Process');
+  };
+
+  (window as any).toggleService = (name: string, action: string) => {
+    sendCommand({ type: 'ToggleService', name, action });
+    setTimeout(() => sendCommand({ type: 'ListServices' }), 1000);
+  };
 }

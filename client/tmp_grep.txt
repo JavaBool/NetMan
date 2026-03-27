@@ -1,0 +1,12 @@
+  let isDisconnected = false;
+    if (isDisconnected) return;
+         isDisconnected = true;
+         document.getElementById('remote-view')?.classList.add('disconnected');
+         showAlert('Connection to server lost. The dashboard is now in read-only mode.', 'Server Disconnected');
+      if (!isDisconnected) {
+      if (isDisconnected) return;
+      if (isDisconnected) return;
+      if (isDisconnected) return;
+    if (sessionToken && socket?.readyState === WebSocket.OPEN && !isDisconnected) {
+    if (isDisconnected) return;
+      if (isDisconnected) return;

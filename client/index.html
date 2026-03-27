@@ -105,6 +105,14 @@
                 <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 12h-4l-3 9L9 3l-3 9H2"></path></svg>
                 Terminal V2
               </button>
+              <button class="nav-btn" id="nav-processes" data-target="tab-processes">
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 21v-7a5 5 0 1 1 10 0v7"></path><path d="M10 21V7"></path><path d="M10 21v-7"></path><path d="M10 21h10"></path></svg>
+                Processes
+              </button>
+              <button class="nav-btn" id="nav-services" data-target="tab-services">
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v4"></path><path d="M12 18v4"></path><path d="M4.93 4.93l2.83 2.83"></path><path d="M16.24 16.24l2.83 2.83"></path><path d="M2 12h4"></path><path d="M18 12h4"></path><path d="M4.93 19.07l2.83-2.83"></path><path d="M16.24 7.76l2.83-2.83"></path></svg>
+                Services
+              </button>
               <button class="nav-btn" id="nav-power" data-target="tab-power">
                 <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M18.36 6.64a9 9 0 1 1-12.73 0"></path><line x1="12" y1="2" x2="12" y2="12"></line></svg>
                 Power
@@ -128,6 +136,14 @@
                 <h2 id="remote-title">NetMan Remote</h2>
               </div>
               <div class="header-right">
+                <button id="btn-fetch-clipboard" class="secondary-btn" title="Fetch Remote Clipboard to Local">
+                  <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align: middle; margin-right: 4px;"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"></path><rect x="8" y="2" width="8" height="4" rx="1" ry="1"></rect><path d="M12 11v6"></path><path d="M9 14l3 3 3-3"></path></svg>
+                  Fetch
+                </button>
+                <button id="btn-push-clipboard" class="secondary-btn" title="Push Local Clipboard to Remote">
+                  <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align: middle; margin-right: 4px;"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"></path><rect x="8" y="2" width="8" height="4" rx="1" ry="1"></rect><path d="M12 17V11"></path><path d="M15 14l-3-3-3 3"></path></svg>
+                  Push
+                </button>
                 <button id="btn-screenshot" class="secondary-btn" title="Take Remote Screenshot">
                   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 6px;"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path><circle cx="12" cy="13" r="4"></circle></svg>
                   Screenshot
@@ -269,6 +285,66 @@
               <!-- Terminal V2 Tab (xterm.js) -->
               <div id="tab-terminal-v2" class="tab-pane glass-panel">
                 <div id="xterm-container" style="width: 100%; height: 100%; padding: 10px; box-sizing: border-box; background: #000; border-radius: 8px; overflow: hidden;"></div>
+              </div>
+
+              <!-- Processes Tab -->
+              <div id="tab-processes" class="tab-pane glass-panel">
+                <div class="tab-header">
+                  <h3>Running Processes</h3>
+                  <div class="search-wrapper">
+                    <input type="text" id="process-search" class="search-input" placeholder="Search PID or Name..." autocomplete="off" />
+                  </div>
+                  <select id="process-filter" class="filter-select">
+                    <option value="all">All Processes</option>
+                    <option value="high-cpu">High CPU (&gt;1%)</option>
+                    <option value="high-mem">High RAM (&gt;100MB)</option>
+                  </select>
+                  <button id="btn-refresh-processes" class="secondary-btn small">Refresh</button>
+                </div>
+                <div class="table-container">
+                  <table class="data-table">
+                    <thead>
+                      <tr>
+                        <th class="sortable" data-sort="pid" data-table="process">PID <span class="sort-icon"></span></th>
+                        <th class="sortable" data-sort="name" data-table="process">Name <span class="sort-icon"></span></th>
+                        <th class="sortable" data-sort="cpu" data-table="process">CPU % <span class="sort-icon"></span></th>
+                        <th class="sortable" data-sort="mem_mb" data-table="process">RAM <span class="sort-icon"></span></th>
+                        <th>Action</th>
+                      </tr>
+                    </thead>
+                    <tbody id="process-list">
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              <!-- Services Tab -->
+              <div id="tab-services" class="tab-pane glass-panel">
+                <div class="tab-header">
+                  <h3>System Services</h3>
+                  <div class="search-wrapper">
+                    <input type="text" id="service-search" class="search-input" placeholder="Search Service Name..." autocomplete="off" />
+                  </div>
+                  <select id="service-filter" class="filter-select">
+                    <option value="all">All Services</option>
+                    <option value="running">Running Only</option>
+                    <option value="stopped">Stopped Only</option>
+                  </select>
+                  <button id="btn-refresh-services" class="secondary-btn small">Refresh</button>
+                </div>
+                <div class="table-container">
+                  <table class="data-table">
+                    <thead>
+                      <tr>
+                        <th class="sortable" data-sort="name" data-table="service">Name <span class="sort-icon"></span></th>
+                        <th class="sortable" data-sort="status" data-table="service">Status <span class="sort-icon"></span></th>
+                        <th>Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody id="service-list">
+                    </tbody>
+                  </table>
+                </div>
               </div>
 
               <div id="tab-power" class="tab-pane glass-panel">

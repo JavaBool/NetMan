@@ -1,0 +1,2 @@
+    Checking netman-server v0.1.0 (D:\Projects\Antigravity\NetMan\server)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.17s
