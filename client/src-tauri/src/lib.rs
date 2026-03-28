@@ -4,6 +4,7 @@ use std::fs;
 use tauri::Manager;
 use tauri_plugin_opener::OpenerExt;
 use tauri_plugin_dialog::DialogExt;
+#[cfg(not(mobile))]
 use tokio::sync::oneshot;
 
 #[tauri::command]
@@ -45,15 +46,24 @@ fn greet(name: &str) -> String {
 
 #[tauri::command]
 async fn pick_folder(app: tauri::AppHandle) -> Result<String, String> {
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    app.dialog().file().pick_folder(move |folder| {
-        let _ = tx.send(folder);
-    });
-    
-    match rx.await {
-        Ok(Some(p)) => Ok(p.to_string()),
-        Ok(None) => Err("Cancelled".to_string()),
-        Err(_) => Err("Dialog failed".to_string()),
+    #[cfg(mobile)]
+    {
+        let _ = app; // Unused
+        return Err("Folder picking is not supported on mobile platforms".to_string());
+    }
+
+    #[cfg(not(mobile))]
+    {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        app.dialog().file().pick_folder(move |folder: Option<tauri_plugin_dialog::FilePath>| {
+            let _ = tx.send(folder);
+        });
+        
+        match rx.await {
+            Ok(Some(p)) => Ok(p.to_string()),
+            Ok(None) => Err("Cancelled".to_string()),
+            Err(_) => Err("Dialog failed".to_string()),
+        }
     }
 }
 
@@ -63,7 +73,7 @@ async fn pick_save_path(app: tauri::AppHandle, default_name: String) -> Result<S
     app.dialog()
         .file()
         .set_file_name(default_name)
-        .save_file(move |file| {
+        .save_file(move |file: Option<tauri_plugin_dialog::FilePath>| {
             let _ = tx.send(file);
         });
     
