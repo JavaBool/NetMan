@@ -3,6 +3,7 @@ use chrono::Local;
 use std::fs;
 use tauri::Manager;
 use tauri_plugin_opener::OpenerExt;
+use tauri_plugin_dialog::DialogExt;
 
 #[tauri::command]
 fn save_screenshot(
@@ -42,27 +43,33 @@ fn greet(name: &str) -> String {
 }
 
 #[tauri::command]
-async fn pick_folder() -> Result<String, String> {
-    let folder = rfd::AsyncFileDialog::new()
-        .pick_folder()
-        .await;
+async fn pick_folder(app: tauri::AppHandle) -> Result<String, String> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog().file().pick_folder(move |folder| {
+        let _ = tx.send(folder);
+    });
     
-    match folder {
-        Some(p) => Ok(p.path().to_string_lossy().to_string()),
-        None => Err("Cancelled".to_string()),
+    match rx.await {
+        Ok(Some(p)) => Ok(p.to_string()),
+        Ok(None) => Err("Cancelled".to_string()),
+        Err(_) => Err("Dialog failed".to_string()),
     }
 }
 
 #[tauri::command]
-async fn pick_save_path(default_name: String) -> Result<String, String> {
-    let file = rfd::AsyncFileDialog::new()
-        .set_file_name(&default_name)
-        .save_file()
-        .await;
+async fn pick_save_path(app: tauri::AppHandle, default_name: String) -> Result<String, String> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog()
+        .file()
+        .set_file_name(default_name)
+        .save_file(move |file| {
+            let _ = tx.send(file);
+        });
     
-    match file {
-        Some(p) => Ok(p.path().to_string_lossy().to_string()),
-        None => Err("Cancelled".to_string()),
+    match rx.await {
+        Ok(Some(p)) => Ok(p.to_string()),
+        Ok(None) => Err("Cancelled".to_string()),
+        Err(_) => Err("Dialog failed".to_string()),
     }
 }
 
@@ -90,6 +97,7 @@ fn append_file_binary(path: String, data_base64: String) -> Result<(), String> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             greet, 
             save_screenshot,
