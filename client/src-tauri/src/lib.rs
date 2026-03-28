@@ -4,6 +4,7 @@ use std::fs;
 use tauri::Manager;
 use tauri_plugin_opener::OpenerExt;
 use tauri_plugin_dialog::DialogExt;
+use tokio::sync::oneshot;
 
 #[tauri::command]
 fn save_screenshot(
