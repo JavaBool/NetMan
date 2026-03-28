@@ -7,6 +7,7 @@ use enigo::{
 };
 use futures_util::{stream::StreamExt, SinkExt};
 use serde::{Deserialize, Serialize};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use std::{collections::HashSet, sync::Arc};
 use tokio::{
     net::{TcpListener, TcpStream},
@@ -16,7 +17,6 @@ use tokio_util::sync::CancellationToken;
 use tokio_tungstenite::{accept_async, tungstenite::Message};
 use uuid::Uuid;
 use xcap::Monitor;
-use base64::{Engine as _, engine::general_purpose::STANDARD};
 
 mod file_manager;
 
@@ -88,6 +88,18 @@ enum ClientMessage {
     CopyFile { token: String, src: String, dest: String },
     ReadFile { token: String, path: String },
     WriteFile { token: String, path: String, content: String },
+    UploadChunk {
+        token: String,
+        id: String,
+        path: String,
+        data_base64: String,
+        append: bool,
+    },
+    DownloadRequest {
+        token: String,
+        id: String,
+        path: String,
+    },
     OpenFile { token: String, path: String },
     ValidatePath { token: String, path: String },
 }
@@ -158,6 +170,12 @@ enum ServerMessage {
         path: String,
         folders: Vec<String>,
     },
+    UploadStatus {
+        id: String,
+        success: bool,
+        message: String,
+        chunk_index: usize,
+    },
     FileContent {
         path: String,
         content: String,
@@ -169,6 +187,11 @@ enum ServerMessage {
     },
     Error {
         message: String,
+    },
+    DownloadChunk {
+        id: String,
+        data_base64: String,
+        is_last: bool,
     },
 }
 
@@ -749,6 +772,24 @@ async fn handle_connection(stream: TcpStream, addr: std::net::SocketAddr, state:
                                     });
                                 }
                             }
+
+                            #[cfg(target_os = "macos")]
+                            {
+                                let cmd = match action.as_str() {
+                                    "mac_shutdown" => Some("osascript -e 'tell app \"System Events\" to shut down'"),
+                                    "mac_restart" => Some("osascript -e 'tell app \"System Events\" to restart'"),
+                                    "mac_sleep" => Some("osascript -e 'tell app \"System Events\" to sleep'"),
+                                    "mac_lock" => Some("osascript -e 'tell application \"System Events\" to keystroke \"q\" using {control command}'"),
+                                    _ => None,
+                                };
+                                if let Some(c) = cmd {
+                                    tokio::spawn(async move {
+                                        let _ = tokio::process::Command::new("sh")
+                                            .args(&["-c", c])
+                                            .status().await;
+                                    });
+                                }
+                            }
                         }
                     }
                     Ok(ClientMessage::TakeScreenshot { token }) => {
@@ -796,6 +837,16 @@ async fn handle_connection(stream: TcpStream, addr: std::net::SocketAddr, state:
                                 tokio::spawn(async move {
                                     let _ = tokio::process::Command::new("amixer")
                                         .args(["-q", "sset", "Master", &format!("{}%", volume)])
+                                        .output().await;
+                                    let _ = tx_c.send(ServerMessage::AudioState { mute: false, volume, media_title: None });
+                                });
+                            }
+                            #[cfg(target_os = "macos")]
+                            {
+                                let tx_c = msg_tx.clone();
+                                tokio::spawn(async move {
+                                    let _ = tokio::process::Command::new("osascript")
+                                        .args(["-e", &format!("set volume output volume {}", volume)])
                                         .output().await;
                                     let _ = tx_c.send(ServerMessage::AudioState { mute: false, volume, media_title: None });
                                 });
@@ -866,6 +917,23 @@ async fn handle_connection(stream: TcpStream, addr: std::net::SocketAddr, state:
                                     }
                                 }
                             }
+                            #[cfg(target_os = "macos")]
+                            {
+                                let output = tokio::process::Command::new("launchctl")
+                                    .arg("list")
+                                    .output().await;
+                                if let Ok(out) = output {
+                                    let s = String::from_utf8_lossy(&out.stdout);
+                                    for line in s.lines().skip(1) { // Skip header
+                                        let parts: Vec<&str> = line.split_whitespace().collect();
+                                        if parts.len() >= 3 {
+                                            let name = parts[2].to_string();
+                                            let status = if parts[0] == "-" { "stopped" } else { "running" };
+                                            services.push(ServiceItem { name, status: status.to_string() });
+                                        }
+                                    }
+                                }
+                            }
                             let response = ServerMessage::ServiceList { services };
                             let _ = sender.send(Message::Text(tokio_tungstenite::tungstenite::Utf8Bytes::from(serde_json::to_string(&response).unwrap()))).await;
                         }
@@ -896,6 +964,20 @@ async fn handle_connection(stream: TcpStream, addr: std::net::SocketAddr, state:
                                 if !cmd.is_empty() {
                                     let _ = tokio::process::Command::new("systemctl")
                                         .args([cmd, &name])
+                                        .status().await;
+                                }
+                            }
+                            #[cfg(target_os = "macos")]
+                            {
+                                let cmd = match action.as_str() {
+                                    "start" => Some("load"),
+                                    "stop" => Some("unload"),
+                                    _ => None,
+                                };
+                                if let Some(c) = cmd {
+                                    // Basic launchctl command for service management
+                                    let _ = tokio::process::Command::new("launchctl")
+                                        .args([c, "-w", &name])
                                         .status().await;
                                 }
                             }
@@ -1132,6 +1214,78 @@ async fn handle_connection(stream: TcpStream, addr: std::net::SocketAddr, state:
                             }
                         }
                     }
+                    Ok(ClientMessage::UploadChunk { token, id, path, data_base64, append }) => {
+                        let state_lock = state.lock().await;
+                        if state_lock.active_tokens.contains(&token) {
+                            drop(state_lock);
+                            let data = STANDARD.decode(&data_base64).unwrap_or_default();
+                            match file_manager::write_chunk(&path, &data, append) {
+                                Ok(_) => {
+                                    let _ = sender.send(Message::Text(tokio_tungstenite::tungstenite::Utf8Bytes::from(serde_json::to_string(&ServerMessage::UploadStatus { 
+                                        id, 
+                                        success: true, 
+                                        message: "Chunk written".into(),
+                                        chunk_index: 0
+                                    }).unwrap()))).await;
+                                },
+                                Err(e) => {
+                                    let _ = sender.send(Message::Text(tokio_tungstenite::tungstenite::Utf8Bytes::from(serde_json::to_string(&ServerMessage::UploadStatus { 
+                                        id, 
+                                        success: false, 
+                                        message: format!("Write failed: {}", e),
+                                        chunk_index: 0
+                                    }).unwrap()))).await;
+                                }
+                            }
+                        }
+                    }
+                    Ok(ClientMessage::DownloadRequest { token, id, path }) => {
+                        let state_lock = state.lock().await;
+                        if state_lock.active_tokens.contains(&token) {
+                            drop(state_lock);
+                            let path_c = path.clone();
+                            let msg_tx_c = msg_tx.clone();
+                            let id_c = id.clone();
+                            tokio::spawn(async move {
+                                let metadata = match std::fs::metadata(&path_c) {
+                                    Ok(m) => m,
+                                    Err(e) => {
+                                        let _ = msg_tx_c.send(ServerMessage::Error { 
+                                            message: format!("File not found or inaccessible: {}", e) 
+                                        });
+                                        return;
+                                    }
+                                };
+                                let total_size = metadata.len();
+                                let chunk_size = 256 * 1024; // 256KB
+                                let mut offset = 0;
+                                while offset < total_size {
+                                    let read_size = std::cmp::min(chunk_size as u64, total_size - offset) as usize;
+                                    match file_manager::read_file_chunk(&path_c, offset, read_size) {
+                                        Ok(data) => {
+                                            offset += read_size as u64;
+                                            let is_last = offset >= total_size;
+                                            let b64 = STANDARD.encode(&data);
+                                            if msg_tx_c.send(ServerMessage::DownloadChunk { 
+                                                id: id_c.clone(),
+                                                data_base64: b64,
+                                                is_last
+                                            }).is_err() { break; }
+                                            
+                                            // Small throttle to avoid overwhelming buffers
+                                            tokio::time::sleep(tokio::time::Duration::from_millis(15)).await;
+                                        },
+                                        Err(e) => {
+                                            let _ = msg_tx_c.send(ServerMessage::Error { 
+                                                message: format!("Read failed during download: {}", e) 
+                                            });
+                                            break;
+                                        }
+                                    }
+                                }
+                            });
+                        }
+                    }
                     Ok(ClientMessage::OpenFile { token, path }) => {
                         let state_lock = state.lock().await;
                         if state_lock.active_tokens.contains(&token) {
@@ -1263,6 +1417,28 @@ async fn get_audio_state() -> (bool, u8, Option<String>) {
         } else { None };
         
         return (mute, vol, media);
+    } else if cfg!(target_os = "macos") {
+        let mut mute = false;
+        let mut vol = 0;
+        let output = tokio::process::Command::new("osascript")
+            .args(&["-e", "get volume settings"])
+            .output().await;
+
+        if let Ok(out) = output {
+            let s = String::from_utf8_lossy(&out.stdout);
+            // Example: output volume:50, input volume:50, alert volume:50, output muted:false
+            if let Some(p) = s.split("output volume:").nth(1) {
+                if let Some(val) = p.split(',').next() {
+                    vol = val.parse::<u8>().unwrap_or(0);
+                }
+            }
+            mute = s.contains("output muted:true");
+        }
+        
+        // Media info on macOS is tricky via CLI, potentially use 'Now Playing' or specific app scripts
+        let media = None; 
+        
+        return (mute, vol, media);
     }
     (false, 0, None)
 }
@@ -1275,7 +1451,7 @@ fn get_server_capabilities() -> Vec<String> {
         "file_manager".to_string(),
     ];
     
-    if cfg!(target_os = "windows") {
+    if cfg!(target_os = "windows") || cfg!(target_os = "macos") {
         caps.push("screen_share".to_string());
         caps.push("touchpad".to_string());
         caps.push("media".to_string());

@@ -307,6 +307,224 @@ function initRemoteView(ip_p?: string, user_p?: string, pass_p?: string, name_p?
   let isWindowsHost = false;
   let selectedItems: Set<string> = new Set(); // multi-select state
 
+  interface Settings {
+    downloadPath: string;
+    askDownloadPath: boolean;
+  }
+
+  let appSettings: Settings = {
+    downloadPath: '',
+    askDownloadPath: true
+  };
+
+  function loadSettings() {
+    const saved = localStorage.getItem('netman_settings');
+    if (saved) {
+      try {
+        appSettings = { ...appSettings, ...JSON.parse(saved) };
+      } catch (e) { console.error('Failed to parse settings', e); }
+    }
+    // Update UI if elements exist
+    const pathInput = document.getElementById('setting-download-path') as HTMLInputElement;
+    const askCheck = document.getElementById('setting-ask-download') as HTMLInputElement;
+    if (pathInput) pathInput.value = appSettings.downloadPath;
+    if (askCheck) askCheck.checked = appSettings.askDownloadPath;
+  }
+
+  function saveSettings() {
+    const pathInput = document.getElementById('setting-download-path') as HTMLInputElement;
+    const askCheck = document.getElementById('setting-ask-download') as HTMLInputElement;
+    if (pathInput && askCheck) {
+      appSettings.downloadPath = pathInput.value.trim();
+      appSettings.askDownloadPath = askCheck.checked;
+      localStorage.setItem('netman_settings', JSON.stringify(appSettings));
+      showAlert('Settings saved successfully.', 'Success');
+    }
+  }
+
+  interface TransferInfo {
+    id: string;
+    name: string;
+    progress: number;
+    status: 'uploading' | 'downloading' | 'done' | 'error';
+    type: 'upload' | 'download';
+    error?: string;
+    chunks?: Uint8Array[]; // For downloads
+    localPath?: string;   // For native downloads
+  }
+  const activeTransfers: Map<string, TransferInfo> = new Map();
+
+  function renderTransferList() {
+    const uploadList = document.getElementById('fm-upload-list');
+    const downloadList = document.getElementById('fm-download-list');
+    if (!uploadList || !downloadList) return;
+
+    const transfers = Array.from(activeTransfers.values()).reverse();
+    const uploads = transfers.filter(t => t.type === 'upload');
+    const downloads = transfers.filter(t => t.type === 'download');
+
+    const renderItems = (items: TransferInfo[]) => {
+      if (items.length === 0) {
+        return `<div class="picker-empty" style="padding: 1rem; font-size: 0.8rem;">No active transfers</div>`;
+      }
+      return items.map(transfer => `
+        <div class="upload-item ${transfer.status}" data-id="${transfer.id}">
+          <button class="upload-clear-btn" title="Clear transfer">&times;</button>
+          <div class="upload-info">
+            <span class="upload-name" title="${transfer.name}">${transfer.name}</span>
+            <span class="upload-pct">${transfer.status === 'error' ? 'Error' : transfer.progress + '%'}</span>
+          </div>
+          <div class="upload-progress-container">
+            <div class="upload-progress-bar" style="width: ${transfer.progress}%"></div>
+          </div>
+          ${transfer.error ? `<div style="font-size:0.7rem; color:var(--danger); margin-top:4px;">${transfer.error}</div>` : ''}
+        </div>
+      `).join('');
+    };
+
+    uploadList.innerHTML = renderItems(uploads);
+    downloadList.innerHTML = renderItems(downloads);
+
+    // Wire clear buttons for both
+    [uploadList, downloadList].forEach(list => {
+      list.querySelectorAll('.upload-clear-btn').forEach(btn => {
+        (btn as HTMLElement).onclick = (e: MouseEvent) => {
+          const item = (e.target as HTMLElement).closest('.upload-item') as HTMLElement;
+          const id = item.dataset.id;
+          if (id) {
+            activeTransfers.delete(id);
+            renderTransferList();
+          }
+        };
+      });
+    });
+  }
+
+  async function startUpload(file: File) {
+    if (!currentFmPath) return showAlert("Please navigate to a folder first.", "Upload Error");
+    
+    const id = `up_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
+    const info: TransferInfo = { id, name: file.name, progress: 0, status: 'uploading', type: 'upload' };
+    activeTransfers.set(id, info);
+    renderTransferList();
+
+    const CHUNK_SIZE = 256 * 1024; // 256KB chunks
+    const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+
+    try {
+      for (let i = 0; i < totalChunks; i++) {
+        // If upload was cleared by user manually from UI
+        if (!activeTransfers.has(id)) return;
+
+        const start = i * CHUNK_SIZE;
+        const end = Math.min(start + CHUNK_SIZE, file.size);
+        const chunk = file.slice(start, end);
+
+        // Convert chunk to base64
+        const buffer = await chunk.arrayBuffer();
+        let binary = '';
+        const bytes = new Uint8Array(buffer);
+        for (let j = 0; j < bytes.byteLength; j++) {
+            binary += String.fromCharCode(bytes[j]);
+        }
+        const base64 = window.btoa(binary);
+
+        sendCommand({
+          type: 'UploadChunk',
+          id,
+          path: joinPath(currentFmPath, file.name),
+          data_base64: base64,
+          append: i > 0
+        });
+
+        // Wait for server acknowledgment
+        await new Promise<void>((resolve, reject) => {
+          const handler = (e: any) => {
+            const data = e.detail;
+            if (data.type === 'UploadStatus' && data.id === id) {
+              window.removeEventListener('fm_upload_ack', handler);
+              if (data.success) {
+                info.progress = Math.round(((i + 1) / totalChunks) * 100);
+                renderTransferList();
+                resolve();
+              } else {
+                reject(new Error(data.message));
+              }
+            }
+          };
+          window.addEventListener('fm_upload_ack', handler);
+          // 30s timeout per chunk
+          setTimeout(() => {
+            window.removeEventListener('fm_upload_ack', handler);
+            reject(new Error("Timeout waiting for server acknowledgment"));
+          }, 30000);
+        });
+      }
+
+      info.status = 'done';
+      info.progress = 100;
+      renderTransferList();
+      // Auto-refresh file list after successful upload
+      setTimeout(() => sendCommand({ type: 'ListDir', path: currentFmPath }), 500);
+
+    } catch (err: any) {
+      console.error('[UPLOAD] Error:', err);
+      info.status = 'error';
+      info.error = err.message || "Upload failed";
+      renderTransferList();
+    }
+  }
+
+  async function handleDownload(remotePath: string) {
+    if (!socket || socket.readyState !== WebSocket.OPEN) return;
+    const filename = remotePath.split('\\').pop()?.split('/').pop() || 'downloaded_file';
+    
+    let localPath = '';
+    
+    try {
+      if (appSettings.askDownloadPath) {
+        // Native Save Dialog
+        localPath = await invoke('pick_save_path', { defaultName: filename });
+      } else {
+        // Use default folder
+        if (!appSettings.downloadPath) {
+          showAlert('Please set a Default Download Path in Settings or enable "Always Ask".', 'Download Path Required');
+          // Switch to settings tab automatically?
+          document.getElementById('nav-settings')?.click();
+          return;
+        }
+        // Normalize path and join with filename
+        const sep = appSettings.downloadPath.includes('\\') ? '\\' : '/';
+        localPath = appSettings.downloadPath.endsWith(sep) 
+          ? appSettings.downloadPath + filename 
+          : appSettings.downloadPath + sep + filename;
+      }
+    } catch (e) {
+      console.log('Download path selection cancelled or failed', e);
+      return;
+    }
+
+    if (!localPath) return;
+
+    const id = `dl_${Date.now()}`;
+    activeTransfers.set(id, {
+      id,
+      name: filename,
+      progress: 0,
+      status: 'downloading',
+      type: 'download',
+      localPath // Store for streaming write
+    });
+
+    sendCommand({
+      type: 'DownloadRequest',
+      id,
+      path: remotePath
+    });
+
+    renderTransferList();
+  }
+
   // Helper: join two path segments platform-correctly
   function joinPath(base: string, name: string): string {
     if (!base) return name;
@@ -486,7 +704,7 @@ function initRemoteView(ip_p?: string, user_p?: string, pass_p?: string, name_p?
       socket?.send(JSON.stringify({ type: 'Auth', username: user, password: pass }));
     };
 
-    socket.onmessage = (event: MessageEvent) => {
+    socket.onmessage = async (event: MessageEvent) => {
       if (typeof event.data === 'string') {
         const data = JSON.parse(event.data);
         if (data.type === 'AuthResult') {
@@ -541,6 +759,58 @@ function initRemoteView(ip_p?: string, user_p?: string, pass_p?: string, name_p?
                 }
             });
           }
+        } else if (data.type === 'UploadStatus') {
+           // Dispatch event for startUpload handlers
+           window.dispatchEvent(new CustomEvent('fm_upload_ack', { detail: data }));
+        } else if (data.type === 'DownloadChunk') {
+             const info = activeTransfers.get(data.id);
+             if (!info) return;
+
+             if (info.localPath) {
+               // Stream write to local disk via Tauri
+               try {
+                 await invoke('append_file_binary', { 
+                   path: info.localPath, 
+                   dataBase64: data.data_base64 
+                 });
+                 
+                 // Update progress
+                 info.progress = Math.min(99, info.progress + 5); // Estimate if server doesn't provide %
+                 if (data.is_last) {
+                    info.progress = 100;
+                    info.status = 'done';
+                    showAlert(`Download complete: ${info.name}`, 'Success');
+                 }
+               } catch (err) {
+                 info.status = 'error';
+                 info.error = 'Failed to write to disk: ' + err;
+               }
+             } else {
+               // Fallback to legacy Blob accumulation if no localPath (unlikely now)
+               if (!info.chunks) info.chunks = [];
+               const binaryString = atob(data.data_base64);
+               const bytes = new Uint8Array(binaryString.length);
+               for (let i = 0; i < binaryString.length; i++) bytes[i] = binaryString.charCodeAt(i);
+               info.chunks.push(bytes);
+
+               if (data.is_last) {
+                 const blob = new Blob(info.chunks as any[]);
+                 const url = URL.createObjectURL(blob);
+                 const a = document.createElement('a');
+                 a.href = url;
+                 a.download = info.name;
+                 document.body.appendChild(a);
+                 a.click();
+                 document.body.removeChild(a);
+                 URL.revokeObjectURL(url);
+
+                 info.progress = 100;
+                 info.status = 'done';
+               } else {
+                 info.progress = Math.min(99, Math.floor(info.progress + 5));
+               }
+             }
+             renderTransferList();
         } else if (data.type === 'ProcessList') {
           const search = (document.getElementById('process-search') as HTMLInputElement).value.toLowerCase();
           renderProcessList(data.processes, search);
@@ -1101,16 +1371,7 @@ function initRemoteView(ip_p?: string, user_p?: string, pass_p?: string, name_p?
     input.onchange = (e: any) => {
       const file = e.target.files[0];
       if (file) {
-        const reader = new FileReader();
-        reader.onload = (re: any) => {
-          const content = re.target.result;
-          // Note: Simple direct upload for now. For larger files, we'd chunk.
-          // NetMan server isn't really optimized yet for binary blobs via JSON.
-          showAlert("Upload started (limited to textual files for now).", "File Upload");
-          sendCommand({ type: 'WriteFile', path: joinPath(currentFmPath, file.name), content });
-          setTimeout(() => sendCommand({ type: 'ListDir', path: currentFmPath }), 1000);
-        };
-        reader.readAsText(file);
+        startUpload(file);
       }
     };
     input.click();
@@ -1158,12 +1419,19 @@ function initRemoteView(ip_p?: string, user_p?: string, pass_p?: string, name_p?
     const btnPerm = document.getElementById('btn-sel-perm') as HTMLButtonElement;
     const btnCopy = document.getElementById('btn-sel-copy') as HTMLButtonElement;
     const btnMove = document.getElementById('btn-sel-move') as HTMLButtonElement;
+    const btnDownload = document.getElementById('btn-sel-download') as HTMLButtonElement;
     const selectAll = document.getElementById('fm-select-all') as HTMLInputElement;
 
     if (bar) bar.classList.toggle('active', count > 0);
     if (countEl) countEl.textContent = `${count} item${count !== 1 ? 's' : ''} selected`;
     if (btnOpen) btnOpen.disabled = count !== 1;
-    if (btnRename) btnRename.disabled = count !== 1;
+    if (btnRename) {
+      btnRename.disabled = count !== 1;
+      btnRename.style.display = count === 1 ? 'flex' : 'none';
+    }
+    if (btnDownload) btnDownload.disabled = count === 0;
+    if (btnOpen) btnOpen.disabled = count !== 1;
+    
     if (btnCopy) btnCopy.disabled = count === 0;
     if (btnMove) btnMove.disabled = count === 0;
     if (btnTrash) btnTrash.disabled = count === 0;
@@ -1384,6 +1652,12 @@ function initRemoteView(ip_p?: string, user_p?: string, pass_p?: string, name_p?
     openDestinationPicker('move');
   });
 
+  document.getElementById('btn-sel-download')?.addEventListener('click', () => {
+    const items = [...selectedItems];
+    if (items.length === 0) return;
+    items.forEach(name => handleDownload(joinPath(currentFmPath, name)));
+  });
+
   // Sort Listeners for FM (single block)
   document.querySelectorAll('.fm-table th.sortable').forEach(th => {
     th.addEventListener('click', () => {
@@ -1508,4 +1782,20 @@ function initRemoteView(ip_p?: string, user_p?: string, pass_p?: string, name_p?
       `${label} Files`
     );
   });
+
+  // INITIALIZE SETTINGS
+  loadSettings();
+
+  document.getElementById('btn-browse-download')!.onclick = async () => {
+    try {
+      const folder = await invoke('pick_folder') as string;
+      if (folder) {
+        (document.getElementById('setting-download-path') as HTMLInputElement).value = folder;
+      }
+    } catch (e) {
+      console.log('Folder pick cancelled', e);
+    }
+  };
+
+  document.getElementById('btn-save-settings')!.onclick = () => saveSettings();
 }

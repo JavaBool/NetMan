@@ -41,11 +41,63 @@ fn greet(name: &str) -> String {
     format!("Hello, {}! You've been greeted from Rust!", name)
 }
 
+#[tauri::command]
+async fn pick_folder() -> Result<String, String> {
+    let folder = rfd::AsyncFileDialog::new()
+        .pick_folder()
+        .await;
+    
+    match folder {
+        Some(p) => Ok(p.path().to_string_lossy().to_string()),
+        None => Err("Cancelled".to_string()),
+    }
+}
+
+#[tauri::command]
+async fn pick_save_path(default_name: String) -> Result<String, String> {
+    let file = rfd::AsyncFileDialog::new()
+        .set_file_name(&default_name)
+        .save_file()
+        .await;
+    
+    match file {
+        Some(p) => Ok(p.path().to_string_lossy().to_string()),
+        None => Err("Cancelled".to_string()),
+    }
+}
+
+#[tauri::command]
+fn write_file_binary(path: String, data_base64: String) -> Result<(), String> {
+    let decoded = STANDARD.decode(data_base64).map_err(|e| e.to_string())?;
+    fs::write(path, decoded).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn append_file_binary(path: String, data_base64: String) -> Result<(), String> {
+    use std::io::Write;
+    let decoded = STANDARD.decode(data_base64).map_err(|e| e.to_string())?;
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|e| e.to_string())?;
+    file.write_all(&decoded).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![greet, save_screenshot])
+        .invoke_handler(tauri::generate_handler![
+            greet, 
+            save_screenshot,
+            pick_folder,
+            pick_save_path,
+            write_file_binary,
+            append_file_binary
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

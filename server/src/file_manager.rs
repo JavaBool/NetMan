@@ -1,4 +1,5 @@
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::time::UNIX_EPOCH;
 use crate::{DriveInfo, FileItem};
@@ -10,14 +11,23 @@ pub fn list_drives() -> Vec<DriveInfo> {
     // Use sysinfo for logical drives
     let disks = Disks::new_with_refreshed_list();
     for disk in &disks {
-        let name = disk.name().to_string_lossy().into_owned();
+        let mut name = disk.name().to_string_lossy().into_owned();
         let mount_point = disk.mount_point().to_string_lossy().into_owned();
+        
+        if name.is_empty() {
+            if mount_point == "/" {
+                name = "System Root".to_string();
+            } else {
+                name = mount_point.clone();
+            }
+        }
+
         let total_gb = disk.total_space() as f32 / 1_073_741_824.0;
         let used_gb = (disk.total_space() - disk.available_space()) as f32 / 1_073_741_824.0;
         let drive_type = format!("{:?}", disk.kind());
 
         drives.push(DriveInfo {
-            name: if name.is_empty() { mount_point.clone() } else { name },
+            name,
             mount_point,
             total_gb,
             used_gb,
@@ -25,10 +35,14 @@ pub fn list_drives() -> Vec<DriveInfo> {
         });
     }
 
-    // On Linux, specifically check /media and /mnt if not already present
-    #[cfg(target_os = "linux")]
+    // On Linux/macOS, specifically check /media, /mnt, /Volumes if not already present
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
+        #[cfg(target_os = "linux")]
         let common_mounts = vec!["/media", "/mnt"];
+        #[cfg(target_os = "macos")]
+        let common_mounts = vec!["/Volumes"];
+
         for base in common_mounts {
             if let Ok(entries) = fs::read_dir(base) {
                 for entry in entries.flatten() {
@@ -104,8 +118,28 @@ pub fn read_file(path: &str) -> std::io::Result<String> {
     fs::read_to_string(path)
 }
 
+pub fn read_file_chunk(path: &str, offset: u64, size: usize) -> std::io::Result<Vec<u8>> {
+    let mut file = fs::File::open(path)?;
+    file.seek(SeekFrom::Start(offset))?;
+    let mut buffer = vec![0; size];
+    let n = file.read(&mut buffer)?;
+    buffer.truncate(n);
+    Ok(buffer)
+}
+
 pub fn write_file(path: &str, content: &str) -> std::io::Result<()> {
     fs::write(path, content)
+}
+
+pub fn write_chunk(path: &str, data: &[u8], append: bool) -> std::io::Result<()> {
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .append(append)
+        .truncate(!append)
+        .open(path)?;
+    file.write_all(data)?;
+    Ok(())
 }
 
 pub fn open_file(path: &str) -> Result<(), String> {
