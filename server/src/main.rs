@@ -18,6 +18,8 @@ use uuid::Uuid;
 use xcap::Monitor;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 
+mod file_manager;
+
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ProcessItem {
     pub pid: u32,
@@ -30,6 +32,24 @@ pub struct ProcessItem {
 pub struct ServiceItem {
     pub name: String,
     pub status: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct DriveInfo {
+    pub name: String,
+    pub mount_point: String,
+    pub total_gb: f32,
+    pub used_gb: f32,
+    pub drive_type: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct FileItem {
+    pub name: String,
+    pub is_dir: bool,
+    pub size: u64,
+    pub modified: u64,
+    pub extension: String,
 }
 
 #[derive(Deserialize, Debug)]
@@ -57,6 +77,19 @@ enum ClientMessage {
     ToggleService { token: String, name: String, action: String },
     GetClipboard { token: String },
     SetClipboard { token: String, text: String },
+    ListDrives { token: String },
+    ListDir { token: String, path: String },
+    ListFolders { token: String, path: String },
+    CreateDir { token: String, path: String },
+    CreateFile { token: String, path: String },
+    RenameFile { token: String, old_path: String, new_path: String },
+    DeleteFile { token: String, path: String, permanent: bool },
+    MoveFile { token: String, src: String, dest: String },
+    CopyFile { token: String, src: String, dest: String },
+    ReadFile { token: String, path: String },
+    WriteFile { token: String, path: String, content: String },
+    OpenFile { token: String, path: String },
+    ValidatePath { token: String, path: String },
 }
 
 #[derive(Serialize, Debug)]
@@ -113,6 +146,29 @@ enum ServerMessage {
     },
     ClipboardContents {
         text: String,
+    },
+    DriveList {
+        drives: Vec<DriveInfo>,
+    },
+    DirList {
+        path: String,
+        items: Vec<FileItem>,
+    },
+    FolderList {
+        path: String,
+        folders: Vec<String>,
+    },
+    FileContent {
+        path: String,
+        content: String,
+    },
+    PathValidation {
+        path: String,
+        is_valid: bool,
+        is_dir: bool,
+    },
+    Error {
+        message: String,
     },
 }
 
@@ -866,6 +922,227 @@ async fn handle_connection(stream: TcpStream, addr: std::net::SocketAddr, state:
                             }
                         }
                     }
+                    Ok(ClientMessage::ListDrives { token }) => {
+                        let state_lock = state.lock().await;
+                        if state_lock.active_tokens.contains(&token) {
+                            println!("[SERVER] Listing drives...");
+                            let drives = file_manager::list_drives();
+                            println!("[SERVER] Found {} drives.", drives.len());
+                            let _ = sender.send(Message::Text(tokio_tungstenite::tungstenite::Utf8Bytes::from(serde_json::to_string(&ServerMessage::DriveList { drives }).unwrap()))).await;
+                        }
+                    }
+                    Ok(ClientMessage::ListDir { token, path }) => {
+                        let state_lock = state.lock().await;
+                        if state_lock.active_tokens.contains(&token) {
+                            let path_to_list = if path.is_empty() { file_manager::get_home_dir() } else { path };
+                            println!("[SERVER] Listing directory: {}", path_to_list);
+                            match file_manager::list_dir(&path_to_list) {
+                                Ok(items) => {
+                                    println!("[SERVER] Found {} items in {}", items.len(), path_to_list);
+                                    let _ = sender.send(Message::Text(tokio_tungstenite::tungstenite::Utf8Bytes::from(serde_json::to_string(&ServerMessage::DirList { path: path_to_list, items }).unwrap()))).await;
+                                },
+                                Err(e) => {
+                                    println!("[SERVER] Error listing {}: {}", path_to_list, e);
+                                    let _ = sender.send(Message::Text(tokio_tungstenite::tungstenite::Utf8Bytes::from(serde_json::to_string(&ServerMessage::Error { message: format!("Failed to list directory: {}", e) }).unwrap()))).await;
+                                }
+                            }
+                        }
+                    }
+                    Ok(ClientMessage::ValidatePath { token, path }) => {
+                        let state_lock = state.lock().await;
+                        if state_lock.active_tokens.contains(&token) {
+                            let (is_valid, is_dir) = file_manager::validate_path(&path);
+                            let _ = sender.send(Message::Text(tokio_tungstenite::tungstenite::Utf8Bytes::from(serde_json::to_string(&ServerMessage::PathValidation { path, is_valid, is_dir }).unwrap()))).await;
+                        }
+                    }
+                    Ok(ClientMessage::CreateDir { token, path }) => {
+                        let state_lock = state.lock().await;
+                        if state_lock.active_tokens.contains(&token) {
+                            match file_manager::create_dir(&path) {
+                                Ok(_) => {
+                                    // Refresh after action
+                                    if let Some(parent) = std::path::Path::new(&path).parent() {
+                                        if let Ok(items) = file_manager::list_dir(&parent.to_string_lossy()) {
+                                            let _ = sender.send(Message::Text(tokio_tungstenite::tungstenite::Utf8Bytes::from(serde_json::to_string(&ServerMessage::DirList { path: parent.to_string_lossy().into_owned(), items }).unwrap()))).await;
+                                        }
+                                    }
+                                },
+                                Err(e) => {
+                                    let _ = sender.send(Message::Text(tokio_tungstenite::tungstenite::Utf8Bytes::from(serde_json::to_string(&ServerMessage::Error { message: format!("Failed to create folder: {}", e) }).unwrap()))).await;
+                                }
+                            }
+                        }
+                    }
+                    Ok(ClientMessage::CreateFile { token, path }) => {
+                        let state_lock = state.lock().await;
+                        if state_lock.active_tokens.contains(&token) {
+                            match file_manager::create_file(&path) {
+                                Ok(_) => {
+                                    if let Some(parent) = std::path::Path::new(&path).parent() {
+                                        if let Ok(items) = file_manager::list_dir(&parent.to_string_lossy()) {
+                                            let _ = sender.send(Message::Text(tokio_tungstenite::tungstenite::Utf8Bytes::from(serde_json::to_string(&ServerMessage::DirList { path: parent.to_string_lossy().into_owned(), items }).unwrap()))).await;
+                                        }
+                                    }
+                                },
+                                Err(e) => {
+                                    let _ = sender.send(Message::Text(tokio_tungstenite::tungstenite::Utf8Bytes::from(serde_json::to_string(&ServerMessage::Error { message: format!("Failed to create file: {}", e) }).unwrap()))).await;
+                                }
+                            }
+                        }
+                    }
+                    Ok(ClientMessage::RenameFile { token, old_path, new_path }) => {
+                        let state_lock = state.lock().await;
+                        if state_lock.active_tokens.contains(&token) {
+                            match file_manager::rename(&old_path, &new_path) {
+                                Ok(_) => {
+                                    if let Some(parent) = std::path::Path::new(&new_path).parent() {
+                                        if let Ok(items) = file_manager::list_dir(&parent.to_string_lossy()) {
+                                            let _ = sender.send(Message::Text(tokio_tungstenite::tungstenite::Utf8Bytes::from(serde_json::to_string(&ServerMessage::DirList { path: parent.to_string_lossy().into_owned(), items }).unwrap()))).await;
+                                        }
+                                    }
+                                },
+                                Err(e) => {
+                                    let _ = sender.send(Message::Text(tokio_tungstenite::tungstenite::Utf8Bytes::from(serde_json::to_string(&ServerMessage::Error { message: format!("Failed to rename: {}", e) }).unwrap()))).await;
+                                }
+                            }
+                        }
+                    }
+                    Ok(ClientMessage::DeleteFile { token, path, permanent }) => {
+                        let state_lock = state.lock().await;
+                        if state_lock.active_tokens.contains(&token) {
+                            drop(state_lock); // Release lock before blocking
+                            let path_clone = path.clone();
+                            let result = tokio::task::spawn_blocking(move || {
+                                file_manager::delete(&path_clone, permanent)
+                            }).await;
+
+                            match result {
+                                Ok(Ok(())) => {
+                                    // Refresh parent directory
+                                    if let Some(parent) = std::path::Path::new(&path).parent() {
+                                        if let Ok(items) = file_manager::list_dir(&parent.to_string_lossy()) {
+                                            let _ = sender.send(Message::Text(tokio_tungstenite::tungstenite::Utf8Bytes::from(serde_json::to_string(&ServerMessage::DirList { path: parent.to_string_lossy().into_owned(), items }).unwrap()))).await;
+                                        }
+                                    }
+                                },
+                                Ok(Err(e)) => {
+                                    println!("[SERVER] Delete error: {}", e);
+                                    let _ = sender.send(Message::Text(tokio_tungstenite::tungstenite::Utf8Bytes::from(serde_json::to_string(&ServerMessage::Error { message: format!("Delete failed: {}", e) }).unwrap()))).await;
+                                },
+                                Err(e) => {
+                                    println!("[SERVER] Delete task panicked: {}", e);
+                                    let _ = sender.send(Message::Text(tokio_tungstenite::tungstenite::Utf8Bytes::from(serde_json::to_string(&ServerMessage::Error { message: "Delete operation failed unexpectedly.".into() }).unwrap()))).await;
+                                }
+                            }
+                        }
+                    }
+                    Ok(ClientMessage::ListFolders { token, path }) => {
+                        let state_lock = state.lock().await;
+                        if state_lock.active_tokens.contains(&token) {
+                            if path.is_empty() {
+                                let folders = file_manager::list_root_folders();
+                                let _ = sender.send(Message::Text(tokio_tungstenite::tungstenite::Utf8Bytes::from(serde_json::to_string(&ServerMessage::FolderList { path: "".to_string(), folders }).unwrap()))).await;
+                            } else {
+                                match file_manager::list_folders(&path) {
+                                Ok(folders) => {
+                                    let _ = sender.send(Message::Text(tokio_tungstenite::tungstenite::Utf8Bytes::from(serde_json::to_string(&ServerMessage::FolderList { path: path.clone(), folders }).unwrap()))).await;
+                                },
+                                Err(e) => {
+                                    let _ = sender.send(Message::Text(tokio_tungstenite::tungstenite::Utf8Bytes::from(serde_json::to_string(&ServerMessage::Error { message: format!("Failed to list folders: {}", e) }).unwrap()))).await;
+                                }
+                            }
+                        }
+                    }
+                }
+                Ok(ClientMessage::MoveFile { token, src, dest }) => {
+                        let state_lock = state.lock().await;
+                        if state_lock.active_tokens.contains(&token) {
+                            drop(state_lock);
+                            let src_clone = src.clone();
+                            let dest_clone = dest.clone();
+                            let result = tokio::task::spawn_blocking(move || {
+                                file_manager::move_item(&src_clone, &dest_clone)
+                            }).await;
+                            match result {
+                                Ok(Ok(())) => {
+                                    if let Some(parent) = std::path::Path::new(&src).parent() {
+                                        if let Ok(items) = file_manager::list_dir(&parent.to_string_lossy()) {
+                                            let _ = sender.send(Message::Text(tokio_tungstenite::tungstenite::Utf8Bytes::from(serde_json::to_string(&ServerMessage::DirList { path: parent.to_string_lossy().into_owned(), items }).unwrap()))).await;
+                                        }
+                                    }
+                                },
+                                Ok(Err(e)) => {
+                                    let _ = sender.send(Message::Text(tokio_tungstenite::tungstenite::Utf8Bytes::from(serde_json::to_string(&ServerMessage::Error { message: format!("Move failed: {}", e) }).unwrap()))).await;
+                                },
+                                Err(e) => {
+                                    let _ = sender.send(Message::Text(tokio_tungstenite::tungstenite::Utf8Bytes::from(serde_json::to_string(&ServerMessage::Error { message: format!("Move task failed: {}", e) }).unwrap()))).await;
+                                }
+                            }
+                        }
+                    }
+                    Ok(ClientMessage::CopyFile { token, src, dest }) => {
+                        let state_lock = state.lock().await;
+                        if state_lock.active_tokens.contains(&token) {
+                            drop(state_lock);
+                            let src_clone = src.clone();
+                            let dest_clone = dest.clone();
+                            let result = tokio::task::spawn_blocking(move || {
+                                file_manager::copy_item(&src_clone, &dest_clone)
+                            }).await;
+                            match result {
+                                Ok(Ok(())) => {
+                                    if let Some(parent) = std::path::Path::new(&src).parent() {
+                                        if let Ok(items) = file_manager::list_dir(&parent.to_string_lossy()) {
+                                            let _ = sender.send(Message::Text(tokio_tungstenite::tungstenite::Utf8Bytes::from(serde_json::to_string(&ServerMessage::DirList { path: parent.to_string_lossy().into_owned(), items }).unwrap()))).await;
+                                        }
+                                    }
+                                },
+                                Ok(Err(e)) => {
+                                    let _ = sender.send(Message::Text(tokio_tungstenite::tungstenite::Utf8Bytes::from(serde_json::to_string(&ServerMessage::Error { message: format!("Copy failed: {}", e) }).unwrap()))).await;
+                                },
+                                Err(e) => {
+                                    let _ = sender.send(Message::Text(tokio_tungstenite::tungstenite::Utf8Bytes::from(serde_json::to_string(&ServerMessage::Error { message: format!("Copy task failed: {}", e) }).unwrap()))).await;
+                                }
+                            }
+                        }
+                    }
+                    Ok(ClientMessage::ReadFile { token, path }) => {
+                        let state_lock = state.lock().await;
+                        if state_lock.active_tokens.contains(&token) {
+                            match file_manager::read_file(&path) {
+                                Ok(content) => {
+                                    let _ = sender.send(Message::Text(tokio_tungstenite::tungstenite::Utf8Bytes::from(serde_json::to_string(&ServerMessage::FileContent { path, content }).unwrap()))).await;
+                                },
+                                Err(e) => {
+                                    let _ = sender.send(Message::Text(tokio_tungstenite::tungstenite::Utf8Bytes::from(serde_json::to_string(&ServerMessage::Error { message: format!("Failed to read file: {}", e) }).unwrap()))).await;
+                                }
+                            }
+                        }
+                    }
+                    Ok(ClientMessage::WriteFile { token, path, content }) => {
+                        let state_lock = state.lock().await;
+                        if state_lock.active_tokens.contains(&token) {
+                            match file_manager::write_file(&path, &content) {
+                                Ok(_) => {
+                                    // Optionally notify success
+                                },
+                                Err(e) => {
+                                    let _ = sender.send(Message::Text(tokio_tungstenite::tungstenite::Utf8Bytes::from(serde_json::to_string(&ServerMessage::Error { message: format!("Failed to write file: {}", e) }).unwrap()))).await;
+                                }
+                            }
+                        }
+                    }
+                    Ok(ClientMessage::OpenFile { token, path }) => {
+                        let state_lock = state.lock().await;
+                        if state_lock.active_tokens.contains(&token) {
+                            match file_manager::open_file(&path) {
+                                Ok(_) => {},
+                                Err(e) => {
+                                    let _ = sender.send(Message::Text(tokio_tungstenite::tungstenite::Utf8Bytes::from(serde_json::to_string(&ServerMessage::Error { message: format!("Failed to open file: {}", e) }).unwrap()))).await;
+                                }
+                            }
+                        }
+                    }
                     Err(_) => {}
                 }
             }
@@ -991,7 +1268,12 @@ async fn get_audio_state() -> (bool, u8, Option<String>) {
 }
 
 fn get_server_capabilities() -> Vec<String> {
-    let mut caps = vec!["terminal".to_string(), "power".to_string(), "system".to_string()];
+    let mut caps = vec![
+        "terminal".to_string(), 
+        "power".to_string(), 
+        "system".to_string(),
+        "file_manager".to_string(),
+    ];
     
     if cfg!(target_os = "windows") {
         caps.push("screen_share".to_string());
@@ -1033,7 +1315,7 @@ async fn get_platform_system_details() -> (Vec<String>, String, bool) {
             net = s.lines().find(|l| l.contains(" SSID")).and_then(|l| l.split(':').nth(1)).map(|s| s.trim().to_string()).unwrap_or("Ethernet/Other".to_string());
         }
         // Ping
-        online = tokio::process::Command::new("ping").args(&["-n", "1", "google.com"]).kill_on_drop(true).status().await.map(|s| s.success()).unwrap_or(false);
+        online = tokio::process::Command::new("ping").args(&["-n", "1", "google.com"]).kill_on_drop(true).output().await.map(|o| o.status.success()).unwrap_or(false);
     } else if cfg!(target_os = "linux") {
         // GPU (Basic)
         if let Ok(out) = tokio::process::Command::new("sh").args(&["-c", "lspci | grep -i vga | cut -d: -f3"]).kill_on_drop(true).output().await {

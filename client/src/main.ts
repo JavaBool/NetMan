@@ -294,8 +294,31 @@ function initRemoteView(ip_p?: string, user_p?: string, pass_p?: string, name_p?
   let processFilter = 'all';
   let serviceFilter = 'all';
   
+  // File Manager State
+  let currentFmPath = "";
+  let fmFiles: any[] = [];
+  let fmSortCol = 'name';
+  let fmSortDir: 'asc' | 'desc' = 'asc';
+  let fmSearchQuery = '';
+  let pickerPath = '';
+  let pickerPathHistory: string[] = [];
+  let pendingPickerAction: 'move' | 'copy' | null = null;
+  let pathHistory: string[] = [];
+  let isWindowsHost = false;
+  let selectedItems: Set<string> = new Set(); // multi-select state
+
+  // Helper: join two path segments platform-correctly
+  function joinPath(base: string, name: string): string {
+    if (!base) return name;
+    const sep = isWindowsHost ? '\\' : '/';
+    const trimmed = base.replace(/[\\/]+$/, '');
+    return `${trimmed}${sep}${name}`;
+  }
+  
   // Navigation
-  document.querySelectorAll('.nav-btn').forEach(btn => {
+  const navBtns = document.querySelectorAll('.nav-btn');
+  console.log(`[CLIENT] Initializing navigation for ${navBtns.length} buttons.`);
+  navBtns.forEach(btn => {
     btn.addEventListener('click', () => {
       const targetId = btn.getAttribute('data-target');
       if (!targetId) return;
@@ -341,6 +364,17 @@ function initRemoteView(ip_p?: string, user_p?: string, pass_p?: string, name_p?
       }
       if (targetId === 'tab-services') {
         sendCommand({ type: 'ListServices' });
+      }
+
+      // Special logic for File Manager initial load
+      if (targetId === 'tab-files') {
+        console.log('[CLIENT] Activating File Manager tab...');
+        sendCommand({ type: 'ListDrives' });
+        if (!currentFmPath) {
+          console.log('[CLIENT] currentFmPath is empty, requesting HOME...');
+          // Stagger to avoid dedup guard (50ms window)
+          setTimeout(() => sendCommand({ type: 'ListDir', path: "" }), 100);
+        }
       }
     });
   });
@@ -458,6 +492,7 @@ function initRemoteView(ip_p?: string, user_p?: string, pass_p?: string, name_p?
         if (data.type === 'AuthResult') {
           if (data.success) {
             sessionToken = data.token;
+            isWindowsHost = data.os === 'windows';
             // Set dynamic power tab contents based on detected OS
             if (data.os === 'windows') {
               document.getElementById('power-windows')!.style.display = 'flex';
@@ -472,14 +507,15 @@ function initRemoteView(ip_p?: string, user_p?: string, pass_p?: string, name_p?
                 'touchpad': 'nav-touchpad',
                 'media': 'nav-media',
                 'screen_share': 'nav-screen',
-                'presentation': 'nav-presentation', // Note: presentation is inside media tab but we can hide the section
-                'screenshot': 'btn-screenshot'
+                'presentation': 'nav-presentation',
+                'screenshot': 'btn-screenshot',
+                'file_manager': 'nav-files'
               };
 
               Object.entries(navMap).forEach(([cap, id]) => {
                 const el = document.getElementById(id);
                 if (el) {
-                  el.style.display = caps.includes(cap) ? 'flex' : 'none';
+                  el.style.display = caps.includes(cap) ? (el.tagName === 'BUTTON' ? 'flex' : 'block') : 'none';
                 }
               });
 
@@ -506,9 +542,11 @@ function initRemoteView(ip_p?: string, user_p?: string, pass_p?: string, name_p?
             });
           }
         } else if (data.type === 'ProcessList') {
-          renderProcessList(data.processes);
+          const search = (document.getElementById('process-search') as HTMLInputElement).value.toLowerCase();
+          renderProcessList(data.processes, search);
         } else if (data.type === 'ServiceList') {
-          renderServiceList(data.services);
+          const search = (document.getElementById('service-search') as HTMLInputElement).value.toLowerCase();
+          renderServiceList(data.services, search);
         } else if (data.type === 'ScreenFrame') {
           const screenLoading = document.getElementById('screen-loading')!;
           const screenImg = document.getElementById('screen-img') as HTMLImageElement;
@@ -649,6 +687,35 @@ function initRemoteView(ip_p?: string, user_p?: string, pass_p?: string, name_p?
            }).catch(err => {
               showAlert(`Failed to copy to local clipboard: ${err}`, 'Error');
            });
+        } else if (data.type === 'DriveList') {
+           console.log('[CLIENT] Received DriveList:', data.drives.length, 'drives');
+           renderDriveList(data.drives);
+        } else if (data.type === 'DirList') {
+           console.log('[CLIENT] Received DirList for:', data.path, 'Items:', data.items.length);
+           currentFmPath = data.path;
+           const input = document.getElementById('fm-path-input') as HTMLInputElement;
+           if (input) input.value = data.path;
+           renderFileList(data.items);
+         } else if (data.type === 'FolderList') {
+           (window as any).renderPickerFolders?.(data.path, data.folders);
+         } else if (data.type === 'FileContent') {
+           const editor = document.getElementById('modal-file-editor');
+           const textarea = document.getElementById('file-editor-textarea') as HTMLTextAreaElement;
+           const filename = document.getElementById('editor-filename');
+           if (editor && textarea && filename) {
+             filename.textContent = `Editing: ${data.path}`;
+             textarea.value = data.content;
+             editor.classList.add('active');
+             (editor as any).currentPath = data.path; // Store for saving
+           }
+        } else if (data.type === 'Error') {
+           showAlert(data.message, 'Server Error');
+        } else if (data.type === 'PathValidation') {
+           if (!data.is_valid || !data.is_dir) {
+              showAlert(`Invalid or missing directory: ${data.path}`, 'Error');
+           } else {
+              sendCommand({ type: 'ListDir', path: data.path });
+           }
         }
       }
     };
@@ -966,4 +1033,479 @@ function initRemoteView(ip_p?: string, user_p?: string, pass_p?: string, name_p?
     sendCommand({ type: 'ToggleService', name, action });
     setTimeout(() => sendCommand({ type: 'ListServices' }), 1000);
   };
+
+  // --- File Manager Rendering & Logic ---
+  const btnFmGo = document.getElementById('btn-fm-go');
+  const fmPathInput = document.getElementById('fm-path-input') as HTMLInputElement;
+  const btnFmBack = document.getElementById('btn-fm-back');
+
+  if (btnFmGo && fmPathInput) {
+    btnFmGo.onclick = () => {
+      const val = fmPathInput.value.trim();
+      if (val) sendCommand({ type: 'ValidatePath', path: val });
+    };
+    fmPathInput.onkeydown = (e) => {
+      if (e.key === 'Enter') btnFmGo.click();
+    };
+  }
+
+  if (btnFmBack) {
+    btnFmBack.onclick = () => {
+      if (pathHistory.length > 1) {
+        pathHistory.pop(); // Remove current
+        const prev = pathHistory.pop(); // Get previous
+        if (prev) navigateTo(prev);
+      }
+    };
+  }
+
+  document.getElementById('btn-fm-home')?.addEventListener('click', () => navigateTo('HOME'));
+
+  document.getElementById('btn-fm-refresh')?.addEventListener('click', () => {
+    sendCommand({ type: 'ListDir', path: currentFmPath });
+  });
+
+  document.getElementById('btn-fm-go')?.addEventListener('click', () => {
+    const input = document.getElementById('fm-path-input') as HTMLInputElement;
+    if (input && input.value) navigateTo(input.value);
+  });
+
+  document.getElementById('fm-path-input')?.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      const input = e.target as HTMLInputElement;
+      if (input.value) navigateTo(input.value);
+    }
+  });
+
+  document.getElementById('btn-fm-back')?.addEventListener('click', () => {
+    if (pathHistory.length > 1) {
+      pathHistory.pop(); // Remove current
+      const last = pathHistory.pop(); // Get previous
+      if (last !== undefined) navigateTo(last);
+    }
+  });
+
+  document.getElementById('btn-fm-new-folder')?.addEventListener('click', () => {
+    const name = prompt("Enter new folder name:");
+    if (name) sendCommand({ type: 'CreateDir', path: joinPath(currentFmPath, name) });
+  });
+
+  document.getElementById('btn-fm-new-file')?.addEventListener('click', () => {
+    const name = prompt("Enter new file name:");
+    if (name) sendCommand({ type: 'CreateFile', path: joinPath(currentFmPath, name) });
+  });
+
+  document.getElementById('btn-fm-upload')?.addEventListener('click', () => {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.onchange = (e: any) => {
+      const file = e.target.files[0];
+      if (file) {
+        const reader = new FileReader();
+        reader.onload = (re: any) => {
+          const content = re.target.result;
+          // Note: Simple direct upload for now. For larger files, we'd chunk.
+          // NetMan server isn't really optimized yet for binary blobs via JSON.
+          showAlert("Upload started (limited to textual files for now).", "File Upload");
+          sendCommand({ type: 'WriteFile', path: joinPath(currentFmPath, file.name), content });
+          setTimeout(() => sendCommand({ type: 'ListDir', path: currentFmPath }), 1000);
+        };
+        reader.readAsText(file);
+      }
+    };
+    input.click();
+  });
+
+  // navigateTo must be assigned to window BEFORE renderDriveList is ever called
+  function navigateTo(path: string) {
+    selectedItems.clear(); // Important: clear selection on any navigation
+    if (path === 'HOME') {
+      sendCommand({ type: 'ListDir', path: "" });
+    } else {
+      sendCommand({ type: 'ListDir', path });
+    }
+  }
+  (window as any).navigateTo = navigateTo;
+
+  function renderDriveList(drives: any[]) {
+    const list = document.getElementById('fm-drive-list');
+    if (!list) { console.warn('[CLIENT] fm-drive-list element not found!'); return; }
+    list.innerHTML = drives.map(d => `
+      <button class="fm-sidebar-item" data-path="${d.mount_point.replace(/"/g, '&quot;')}">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="6" width="20" height="12" rx="2"></rect><path d="M6 12h.01"></path><path d="M10 12h.01"></path><path d="M14 12h.01"></path></svg>
+        ${d.name} (${Math.round(d.total_gb)}GB)
+      </button>
+    `).join('');
+    // Wire clicks via event delegation on the parent
+    list.addEventListener('click', (e) => {
+      const target = e.target as HTMLElement;
+      const btn = target.closest('.fm-sidebar-item') as HTMLElement | null;
+      if (btn) {
+        const p = btn.dataset.path;
+        if (p) navigateTo(p);
+      }
+    });
+    console.log(`[CLIENT] Rendered ${drives.length} drives in sidebar.`);
+  }
+
+  function updateSelectionBar() {
+    const count = selectedItems.size;
+    const bar = document.getElementById('fm-selection-bar');
+    const countEl = document.getElementById('fm-sel-count');
+    const btnOpen = document.getElementById('btn-sel-open') as HTMLButtonElement;
+    const btnRename = document.getElementById('btn-sel-rename') as HTMLButtonElement;
+    const btnTrash = document.getElementById('btn-sel-trash') as HTMLButtonElement;
+    const btnPerm = document.getElementById('btn-sel-perm') as HTMLButtonElement;
+    const btnCopy = document.getElementById('btn-sel-copy') as HTMLButtonElement;
+    const btnMove = document.getElementById('btn-sel-move') as HTMLButtonElement;
+    const selectAll = document.getElementById('fm-select-all') as HTMLInputElement;
+
+    if (bar) bar.classList.toggle('active', count > 0);
+    if (countEl) countEl.textContent = `${count} item${count !== 1 ? 's' : ''} selected`;
+    if (btnOpen) btnOpen.disabled = count !== 1;
+    if (btnRename) btnRename.disabled = count !== 1;
+    if (btnCopy) btnCopy.disabled = count === 0;
+    if (btnMove) btnMove.disabled = count === 0;
+    if (btnTrash) btnTrash.disabled = count === 0;
+    if (btnPerm) btnPerm.disabled = count === 0;
+    if (selectAll) selectAll.indeterminate = count > 0 && count < fmFiles.length;
+    if (selectAll) selectAll.checked = count === fmFiles.length && fmFiles.length > 0;
+
+    // Update row highlight states
+    document.querySelectorAll('.fm-row').forEach(row => {
+      const rowEl = row as HTMLElement;
+      const selected = selectedItems.has(rowEl.dataset.name || '');
+      rowEl.classList.toggle('selected', selected);
+      const cb = rowEl.querySelector('.fm-check') as HTMLInputElement;
+      if (cb) cb.checked = selected;
+    });
+  }
+
+  function renderFileList(items: any[]) {
+    fmFiles = items;
+    const list = document.getElementById('fm-file-list');
+    if (!list) { console.warn('[CLIENT] fm-file-list not found'); return; }
+
+    // Track history
+    if (pathHistory[pathHistory.length - 1] !== currentFmPath) {
+      pathHistory.push(currentFmPath);
+      if (pathHistory.length > 50) pathHistory.shift();
+    }
+
+    // Remove stale selections (items no longer in this dir)
+    const names = new Set(items.map(i => i.name));
+    selectedItems.forEach(n => { if (!names.has(n)) selectedItems.delete(n); });
+
+    // Sort
+    items.sort((a, b) => {
+      if (a.is_dir !== b.is_dir) return a.is_dir ? -1 : 1;
+      let vA: any = a[fmSortCol], vB: any = b[fmSortCol];
+      // Numeric sort for size and modified columns
+      if (fmSortCol === 'size' || fmSortCol === 'modified') {
+        return fmSortDir === 'asc' ? vA - vB : vB - vA;
+      }
+      if (typeof vA === 'string') { vA = vA.toLowerCase(); vB = vB.toLowerCase(); }
+      if (vA < vB) return fmSortDir === 'asc' ? -1 : 1;
+      if (vA > vB) return fmSortDir === 'asc' ? 1 : -1;
+      return 0;
+    });
+
+    // Apply search filter
+    const query = fmSearchQuery.toLowerCase();
+    const filtered = query ? items.filter(i => i.name.toLowerCase().includes(query)) : items;
+
+    list.innerHTML = filtered.map(item => {
+      const isSelected = selectedItems.has(item.name);
+      const icon = item.is_dir
+        ? `<svg class="file-icon dir-icon" viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M10 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"/></svg>`
+        : `<svg class="file-icon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"></path><polyline points="13 2 13 9 20 9"></polyline></svg>`;
+      const sizeStr = item.is_dir ? '--' : (item.size >= 1048576 ? (item.size/1048576).toFixed(1) + ' MB' : (item.size/1024).toFixed(1) + ' KB');
+      const dateStr = new Date(item.modified * 1000).toLocaleDateString();
+      return `
+        <tr class="fm-row${isSelected ? ' selected' : ''}" data-name="${item.name.replace(/"/g, '&quot;')}" data-isdir="${item.is_dir}">
+          <td class="check-col"><input type="checkbox" class="fm-check"${isSelected ? ' checked' : ''}></td>
+          <td><div class="file-item-name">${icon} <span>${item.name}</span></div></td>
+          <td>${sizeStr}</td>
+          <td>${dateStr}</td>
+        </tr>`;
+    }).join('');
+
+    // Click handling: routing based on target cell
+    list.onclick = (e) => {
+      const target = e.target as HTMLElement;
+      const row = target.closest('.fm-row') as HTMLElement | null;
+      if (!row) return;
+
+      const name = row.dataset.name || '';
+      const isDir = row.dataset.isdir === 'true';
+      const isCheckClick = target.closest('.check-col') !== null;
+
+      if (isCheckClick) {
+        // Toggle selection
+        if (selectedItems.has(name)) selectedItems.delete(name);
+        else selectedItems.add(name);
+        updateSelectionBar();
+      } else {
+        // Open/Navigate
+        const fullPath = joinPath(currentFmPath, name);
+        if (isDir) {
+           navigateTo(fullPath);
+        } else {
+           const ext = name.split('.').pop()?.toLowerCase();
+           const textExts = ['txt','log','ini','json','md','js','ts','py','rs','html','css','xml','yaml','toml','sh','bat','env','conf','cfg'];
+           if (ext && textExts.includes(ext)) sendCommand({ type: 'ReadFile', path: fullPath });
+           else showAlert('Use "Open on Host" for non-text file types.', 'File Manager');
+        }
+      }
+    };
+
+    console.log(`[CLIENT] Rendered ${items.length} items.`);
+    updateSelectionBar();
+  }
+
+  // Header Sorting
+  document.querySelectorAll('.fm-table th.sortable').forEach(th => {
+    th.addEventListener('click', () => {
+      const col = (th as HTMLElement).dataset.sort || 'name';
+      if (fmSortCol === col) {
+        fmSortDir = (fmSortDir === 'asc' ? 'desc' : 'asc');
+      } else {
+        fmSortCol = col;
+        fmSortDir = 'asc';
+      }
+      // Update sort icons
+      document.querySelectorAll('.fm-table th.sortable').forEach(h => {
+        h.classList.remove('sort-asc', 'sort-desc');
+        if ((h as HTMLElement).dataset.sort === fmSortCol) {
+          h.classList.add(fmSortDir === 'asc' ? 'sort-asc' : 'sort-desc');
+        }
+      });
+      renderFileList(fmFiles);
+    });
+  });
+
+  // Select-All checkbox
+  document.getElementById('fm-select-all')?.addEventListener('change', (e) => {
+    const cb = e.target as HTMLInputElement;
+    if (cb.checked) fmFiles.forEach(f => selectedItems.add(f.name));
+    else selectedItems.clear();
+    updateSelectionBar();
+  });
+
+  // Selection bar buttons
+  document.getElementById('btn-sel-clear')?.addEventListener('click', () => {
+    selectedItems.clear(); updateSelectionBar();
+  });
+  document.getElementById('btn-sel-open')?.addEventListener('click', () => {
+    if (selectedItems.size !== 1) return;
+    const name = [...selectedItems][0];
+    sendCommand({ type: 'OpenFile', path: joinPath(currentFmPath, name) });
+  });
+  document.getElementById('btn-sel-rename')?.addEventListener('click', () => {
+    if (selectedItems.size !== 1) return;
+    (window as any).renameItem([...selectedItems][0]);
+  });
+  document.getElementById('btn-sel-trash')?.addEventListener('click', () => {
+    if (selectedItems.size === 0) return;
+    const count = selectedItems.size;
+    showConfirm(`Move ${count} item${count !== 1 ? 's' : ''} to Trash?`, () => {
+      const toDelete = [...selectedItems];
+      toDelete.forEach(name => sendCommand({ type: 'DeleteFile', path: joinPath(currentFmPath, name), permanent: false }));
+      selectedItems.clear(); updateSelectionBar();
+    }, 'Move to Trash');
+  });
+  document.getElementById('btn-sel-perm')?.addEventListener('click', () => {
+    if (selectedItems.size === 0) return;
+    const count = selectedItems.size;
+    showConfirm(`PERMANENTLY DELETE ${count} item${count !== 1 ? 's' : ''}? This CANNOT be undone!`, () => {
+      const toDelete = [...selectedItems];
+      toDelete.forEach(name => sendCommand({ type: 'DeleteFile', path: joinPath(currentFmPath, name), permanent: true }));
+      selectedItems.clear(); updateSelectionBar();
+    }, 'Permanent Delete ⚠️');
+  });
+
+  (window as any).renameItem = (name: string) => {
+    const modal = document.getElementById('modal-fm-rename');
+    const input = document.getElementById('fm-rename-input') as HTMLInputElement;
+    const confirmBtn = document.getElementById('btn-fm-rename-confirm');
+    if (modal && input && confirmBtn) {
+      input.value = name;
+      modal.classList.add('active');
+      confirmBtn.onclick = () => {
+        const newName = input.value;
+        if (newName && newName !== name) {
+          const oldPath = joinPath(currentFmPath, name);
+          const newPath = joinPath(currentFmPath, newName);
+          sendCommand({ type: 'RenameFile', old_path: oldPath, new_path: newPath });
+        }
+        modal.classList.remove('active');
+      };
+    }
+  };
+
+  const btnSaveFile = document.getElementById('btn-editor-save');
+  if (btnSaveFile) {
+    btnSaveFile.onclick = () => {
+      const editor = document.getElementById('modal-file-editor');
+      const textarea = document.getElementById('file-editor-textarea') as HTMLTextAreaElement;
+      if (editor && textarea && (editor as any).currentPath) {
+        sendCommand({ type: 'WriteFile', path: (editor as any).currentPath, content: textarea.value });
+        editor.classList.remove('active');
+        showAlert('File saved successfully!', 'File Manager');
+      }
+    };
+  }
+
+  (window as any).deleteItem = (name: string, permanent: boolean) => {
+    const path = joinPath(currentFmPath, name);
+    const opStr = permanent ? "PERMANENTLY DELETE" : "move to TRASH";
+    showConfirm(`Are you sure you want to ${opStr} '${name}'?`, () => {
+      sendCommand({ type: 'DeleteFile', path, permanent });
+    }, "Delete Item");
+  };
+
+  (window as any).openOnHost = (name: string) => {
+    sendCommand({ type: 'OpenFile', path: joinPath(currentFmPath, name) });
+  };
+
+  // Search Input
+  document.getElementById('fm-search')?.addEventListener('input', (e) => {
+    fmSearchQuery = (e.target as HTMLInputElement).value;
+    renderFileList(fmFiles);
+  });
+
+  // Move/Copy buttons → open destination picker
+  document.getElementById('btn-sel-copy')?.addEventListener('click', () => {
+    if (selectedItems.size === 0) return;
+    openDestinationPicker('copy');
+  });
+  document.getElementById('btn-sel-move')?.addEventListener('click', () => {
+    if (selectedItems.size === 0) return;
+    openDestinationPicker('move');
+  });
+
+  // Sort Listeners for FM (single block)
+  document.querySelectorAll('.fm-table th.sortable').forEach(th => {
+    th.addEventListener('click', () => {
+      const col = (th as HTMLElement).dataset.sort || 'name';
+      if (fmSortCol === col) {
+        fmSortDir = (fmSortDir === 'asc' ? 'desc' : 'asc') as 'asc' | 'desc';
+      } else {
+        fmSortCol = col;
+        fmSortDir = 'asc';
+      }
+      document.querySelectorAll('.fm-table th.sortable').forEach(h => {
+        h.classList.remove('sort-asc', 'sort-desc');
+        if ((h as HTMLElement).dataset.sort === fmSortCol) {
+          h.classList.add(fmSortDir === 'asc' ? 'sort-asc' : 'sort-desc');
+        }
+      });
+      renderFileList(fmFiles);
+    });
+  });
+
+  // ---- Destination Picker ----
+  function pickerNavigateTo(path: string) {
+    if (pickerPathHistory[pickerPathHistory.length - 1] !== pickerPath) {
+      pickerPathHistory.push(pickerPath);
+    }
+    pickerPath = path;
+    sendCommand({ type: 'ListFolders', path });
+  }
+
+  function renderPickerFolders(path: string, folders: string[]) {
+    pickerPath = path;
+    const pathEl = document.getElementById('picker-current-path');
+    const list = document.getElementById('picker-folder-list');
+    if (pathEl) pathEl.textContent = path || "This PC";
+    if (!list) return;
+
+    if (folders.length === 0) {
+      list.innerHTML = `<div class="picker-empty">No sub-folders here</div>`;
+      return;
+    }
+    list.innerHTML = folders.map(name => {
+      const isDrive = !path;
+      const icon = isDrive 
+        ? `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" style="color:var(--text-dim)"><rect x="2" y="6" width="20" height="12" rx="2"></rect><path d="M6 12h.01"></path><path d="M10 12h.01"></path><path d="M14 12h.01"></path></svg>`
+        : `<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M10 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"/></svg>`;
+      
+      return `
+      <div class="picker-folder-item" data-name="${name.replace(/"/g, '&quot;')}">
+        ${icon}
+        <span>${name}</span>
+      </div>`;
+    }).join('');
+
+    list.onclick = (e) => {
+      const item = (e.target as HTMLElement).closest('.picker-folder-item') as HTMLElement | null;
+      if (item) {
+        const name = item.dataset.name || '';
+        const nextPath = !pickerPath ? name : joinPath(pickerPath, name);
+        pickerNavigateTo(nextPath);
+      }
+    };
+  }
+  (window as any).renderPickerFolders = renderPickerFolders;
+
+  function openDestinationPicker(action: 'move' | 'copy') {
+    pendingPickerAction = action;
+    const modal = document.getElementById('modal-fm-picker');
+    const title = document.getElementById('picker-title');
+    const confirmBtn = document.getElementById('btn-picker-confirm') as HTMLButtonElement;
+    if (!modal) return;
+    if (title) title.textContent = action === 'move' ? 'Move To...' : 'Copy To...';
+    if (confirmBtn) confirmBtn.textContent = action === 'move' ? 'Move Here' : 'Copy Here';
+    pickerPath = currentFmPath;
+    pickerPathHistory = [];
+    sendCommand({ type: 'ListFolders', path: currentFmPath });
+    modal.classList.add('active');
+  }
+
+  document.getElementById('btn-picker-back')?.addEventListener('click', () => {
+    const prev = pickerPathHistory.pop();
+    if (prev !== undefined) {
+      pickerPath = prev;
+      sendCommand({ type: 'ListFolders', path: prev });
+    }
+  });
+  document.getElementById('btn-picker-home')?.addEventListener('click', () => {
+    pickerPathHistory = [];
+    pickerPath = '';
+    sendCommand({ type: 'ListFolders', path: '' });
+  });
+  document.getElementById('btn-picker-cancel')?.addEventListener('click', () => {
+    document.getElementById('modal-fm-picker')?.classList.remove('active');
+    pendingPickerAction = null;
+  });
+  document.getElementById('btn-picker-close')?.addEventListener('click', () => {
+    document.getElementById('modal-fm-picker')?.classList.remove('active');
+    pendingPickerAction = null;
+  });
+  document.getElementById('btn-picker-confirm')?.addEventListener('click', () => {
+    if (!pendingPickerAction || selectedItems.size === 0) return;
+    const action = pendingPickerAction;
+    const destPath = pickerPath;
+    const items = [...selectedItems];
+    const count = items.length;
+    const label = action === 'move' ? 'Move' : 'Copy';
+
+    // Close picker modal before showing confirm
+    document.getElementById('modal-fm-picker')?.classList.remove('active');
+
+    showConfirm(
+      `${label} ${count} item${count !== 1 ? 's' : ''} to "${destPath}"?`,
+      () => {
+        items.forEach(name => {
+          const src = joinPath(currentFmPath, name);
+          if (action === 'move') sendCommand({ type: 'MoveFile', src, dest: destPath });
+          else sendCommand({ type: 'CopyFile', src, dest: destPath });
+        });
+        selectedItems.clear();
+        updateSelectionBar();
+        pendingPickerAction = null;
+      },
+      `${label} Files`
+    );
+  });
 }

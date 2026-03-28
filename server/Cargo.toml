@@ -21,3 +21,5 @@ uuid = { version = "1.22.0", features = ["v4"] }
 xcap = "0.9.1"
 sysinfo = "0.33.1"
 arboard = "3.4.1"
+trash = { version = "5.2.1", features = ["coinit_multithreaded"] }
+open = "5.3.0"
