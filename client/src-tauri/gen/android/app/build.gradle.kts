@@ -17,7 +17,7 @@ android {
     compileSdk = 36
     namespace = "com.praveen_kumar_s.netmanclient"
     defaultConfig {
-        manifestPlaceholders["usesCleartextTraffic"] = "false"
+        manifestPlaceholders["usesCleartextTraffic"] = "true"
         applicationId = "com.praveen_kumar_s.netmanclient"
         minSdk = 24
         targetSdk = 36
