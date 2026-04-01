@@ -1,6 +1,8 @@
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { invoke } from '@tauri-apps/api/core';
 import { isPermissionGranted, requestPermission, sendNotification } from '@tauri-apps/plugin-notification';
+import { writeFile } from '@tauri-apps/plugin-fs';
+import { readText, writeText } from '@tauri-apps/plugin-clipboard-manager';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
@@ -255,6 +257,7 @@ function initRemoteView(ip_p?: string, user_p?: string, pass_p?: string, name_p?
     const backBtn = document.getElementById('btn-back-menu') as HTMLButtonElement;
     backBtn.style.display = 'block';
     backBtn.onclick = () => {
+      manualDisconnect = true; // Prevent autoreconnect loop
       // socket is in parent scope
       // @ts-ignore
       if (socket) socket.close();
@@ -265,6 +268,8 @@ function initRemoteView(ip_p?: string, user_p?: string, pass_p?: string, name_p?
       isTerminalStarted = false;
       // @ts-ignore
       isTerminalV2Started = false;
+      // @ts-ignore
+      isDisconnected = false;
       
       // Default reset
       document.querySelectorAll('.tab-pane').forEach(t => t.classList.remove('active'));
@@ -604,6 +609,58 @@ function initRemoteView(ip_p?: string, user_p?: string, pass_p?: string, name_p?
     });
   });
 
+  // Mobile Bottom Navigation Wire-up
+  const bottomNavBtns = document.querySelectorAll('.bottom-nav-btn');
+  bottomNavBtns.forEach(btn => {
+    btn.addEventListener('click', () => {
+      const targetId = btn.getAttribute('data-target');
+      
+      if (btn.id === 'btn-mobile-more') {
+        const sidebar = document.getElementById('sidebar');
+        const overlay = document.getElementById('sidebar-overlay');
+        sidebar?.classList.toggle('active');
+        overlay?.classList.toggle('active');
+        return;
+      }
+
+      if (!targetId) return;
+
+      // Update active states for bottom nav
+      bottomNavBtns.forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+
+      // Update active states for tab panes
+      document.querySelectorAll('.tab-pane').forEach(tab => tab.classList.remove('active'));
+      document.getElementById(targetId)?.classList.add('active');
+
+      // Sync with desktop sidebar nav if present
+      document.querySelectorAll('.nav-btn').forEach(b => {
+        if (b.getAttribute('data-target') === targetId) {
+          b.classList.add('active');
+          const title = document.getElementById('remote-title');
+          if (title) title.textContent = b.textContent?.trim() || 'NetMan Remote';
+        } else {
+          b.classList.remove('active');
+        }
+      });
+
+      // Handle specific tab logic
+      if (targetId === 'tab-screen') {
+        sendCommand({ type: 'StartScreenShare' });
+      } else {
+        sendCommand({ type: 'StopScreenShare' });
+      }
+
+      if (targetId === 'tab-terminal-v2' && !isTerminalV2Started) {
+        sendCommand({ type: 'StartTerminalV2' });
+        isTerminalV2Started = true;
+        setTimeout(() => fitAddon?.fit(), 50);
+      } else if (targetId === 'tab-terminal-v2') {
+        setTimeout(() => fitAddon?.fit(), 50);
+      }
+    });
+  });
+
   // Refresh Buttons
   document.getElementById('btn-refresh-processes')?.addEventListener('click', () => sendCommand({ type: 'ListProcesses' }));
   document.getElementById('btn-refresh-services')?.addEventListener('click', () => sendCommand({ type: 'ListServices' }));
@@ -672,6 +729,19 @@ function initRemoteView(ip_p?: string, user_p?: string, pass_p?: string, name_p?
   closeSidebar?.addEventListener('click', toggleSidebar);
   overlay?.addEventListener('click', toggleSidebar);
 
+  // Mobile FM Sidebar Toggles
+  const fmMenuToggle = document.getElementById('btn-fm-sidebar-toggle');
+  const fmSidebar = document.getElementById('fm-sidebar');
+  const fmOverlay = document.getElementById('fm-sidebar-overlay');
+  
+  const toggleFmSidebar = () => {
+    fmSidebar?.classList.toggle('active');
+    fmOverlay?.classList.toggle('active');
+  };
+  
+  fmMenuToggle?.addEventListener('click', toggleFmSidebar);
+  fmOverlay?.addEventListener('click', toggleFmSidebar);
+
   // Power Commands Hook
   document.querySelectorAll('.power-btn').forEach(btn => {
     (btn as HTMLElement).onclick = () => {
@@ -703,21 +773,44 @@ function initRemoteView(ip_p?: string, user_p?: string, pass_p?: string, name_p?
     }
   }
 
-  // Auto-connect
-  try {
-    socket = new WebSocket(`ws://${ip}`);
+  // Auto-connect with Reconnection Logic
+  let reconnectAttempts = 0;
+  const maxReconnectDelay = 10000;
+  let manualDisconnect = false;
 
-    socket.onopen = () => {
-      socket?.send(JSON.stringify({ type: 'Auth', username: user, password: pass }));
-    };
+  function connectWebSocket() {
+    try {
+      if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) {
+        return; // Already connecting or connected
+      }
 
-    socket.onmessage = async (event: MessageEvent) => {
-      if (typeof event.data === 'string') {
-        const data = JSON.parse(event.data);
-        if (data.type === 'AuthResult') {
-          if (data.success) {
-            sessionToken = data.token;
-            isWindowsHost = data.os === 'windows';
+      socket = new WebSocket(`ws://${ip}`);
+      
+      if (reconnectAttempts > 0) {
+        const titleEl = document.getElementById('remote-title');
+        if (titleEl) titleEl.textContent = `Reconnecting... (${reconnectAttempts})`;
+      }
+
+      socket.onopen = () => {
+        reconnectAttempts = 0; // Reset backoff on success
+        isDisconnected = false;
+        document.getElementById('remote-view')?.classList.remove('disconnected');
+        
+        if (name) {
+          document.getElementById('remote-title')!.textContent = `Remote: ${name}`;
+        }
+        
+        // Re-authenticate directly
+        socket?.send(JSON.stringify({ type: 'Auth', username: user, password: pass }));
+      };
+
+      socket.onmessage = async (event: MessageEvent) => {
+        if (typeof event.data === 'string') {
+          const data = JSON.parse(event.data);
+          if (data.type === 'AuthResult') {
+            if (data.success) {
+              sessionToken = data.token;
+              isWindowsHost = data.os === 'windows';
             // Set dynamic power tab contents based on detected OS
             if (data.os === 'windows') {
               document.getElementById('power-windows')!.style.display = 'flex';
@@ -760,11 +853,13 @@ function initRemoteView(ip_p?: string, user_p?: string, pass_p?: string, name_p?
               }
             }
 
-            // Activate default tab
-            document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
-            document.querySelectorAll('.tab-pane').forEach(t => t.classList.remove('active'));
-            document.querySelector('[data-target="tab-system"]')?.classList.add('active');
-            document.getElementById('tab-system')?.classList.add('active');
+            // Activate default tab if not already active (important for reconnects)
+            if (!document.querySelector('.tab-pane.active')) {
+                document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
+                document.querySelectorAll('.tab-pane').forEach(t => t.classList.remove('active'));
+                document.querySelector('[data-target="tab-system"]')?.classList.add('active');
+                document.getElementById('tab-system')?.classList.add('active');
+            }
           } else {
             // This should rarely happen now due to Pre-Auth check
             showAlert(`Authentication failed: ${data.message}`, 'Auth Error', () => {
@@ -958,19 +1053,36 @@ function initRemoteView(ip_p?: string, user_p?: string, pass_p?: string, name_p?
           const host = parts[0];
           const port_v = parts[1] || '8082';
 
-          invoke('save_screenshot', {
-            name: name,
-            ip: host,
-            port: port_v,
-            imageBase64: data.image_base64
-          }).then((path: any) => {
-             showAlert(`Screenshot captured and opened!\nFolder: Pictures/NetMan/${name}\nFile: ${path.split(/[\\/]/).pop()}`, 'Screenshot Saved');
-          }).catch((err: any) => {
-             showAlert(`Failed to save or open screenshot: ${err}`, 'Error');
-          });
+          const now = new Date();
+          const timestamp = now.getFullYear().toString() +
+              (now.getMonth() + 1).toString().padStart(2, '0') +
+              now.getDate().toString().padStart(2, '0') + '_' +
+              now.getHours().toString().padStart(2, '0') +
+              now.getMinutes().toString().padStart(2, '0') +
+              now.getSeconds().toString().padStart(2, '0');
+          const filename = `remote-${name}-${host}-${port_v}-${timestamp}.png`;
+          
+          try {
+             // Use Tauri SAF dialog (Storage Access Framework) to explicitly ask user for file permissions and save path
+             const savePath = await invoke('pick_save_path', { defaultName: filename });
+             if (savePath) {
+                 // Decode base64 to bytes and write directly via tauri-plugin-fs which supports Android content:// URIs
+                 const binString = atob(data.image_base64);
+                 const bytes = new Uint8Array(binString.length);
+                 for (let i = 0; i < binString.length; i++) {
+                     bytes[i] = binString.charCodeAt(i);
+                 }
+                 await writeFile(savePath as string, bytes);
+                 showAlert(`Screenshot saved successfully!`, 'Screenshot Saved');
+             } else {
+                 console.log("[CLIENT] Screenshot save cancelled by user.");
+             }
+          } catch(err) {
+             showAlert(`Failed to save screenshot via SAF picker: ${err}`, 'Error');
+          }
         } else if (data.type === 'ClipboardContents') {
            const text = data.text;
-           navigator.clipboard.writeText(text).then(() => {
+           writeText(text).then(() => {
               showAlert('Remote clipboard fetched and copied to local!', 'Clipboard Sync');
            }).catch(err => {
               showAlert(`Failed to copy to local clipboard: ${err}`, 'Error');
@@ -1007,25 +1119,41 @@ function initRemoteView(ip_p?: string, user_p?: string, pass_p?: string, name_p?
         }
       }
     };
-
     socket.onclose = () => {
-      if (sessionToken) {
-         isDisconnected = true;
-         document.getElementById('remote-view')?.classList.add('disconnected');
-         showAlert('Connection to server lost. The dashboard is now in read-only mode.', 'Server Disconnected');
-      }
-      console.warn('[CLIENT] WebSocket closed.');
+      if (manualDisconnect) return;
+      isDisconnected = true;
+      document.getElementById('remote-view')?.classList.add('disconnected');
+      console.warn('[CLIENT] WebSocket closed. Starting auto-reconnect backoff...');
+      
+      const delay = Math.min(1000 * Math.pow(1.5, reconnectAttempts), maxReconnectDelay);
+      reconnectAttempts++;
+
+      const titleEl = document.getElementById('remote-title');
+      if (titleEl) titleEl.textContent = `Reconnecting... (${reconnectAttempts})`;
+      
+      setTimeout(connectWebSocket, delay);
     };
 
     socket.onerror = (error: Event) => {
-      console.error('WebSocket Error', error);
-      if (!isDisconnected) {
-          showAlert('Could not connect to server or connection was reset.', 'Connection Error');
-      }
+      console.error('[CLIENT] WebSocket Error:', error);
+      // Usually triggers onclose, relying on the retry loop rather than throwing popups
     };
   } catch (err) {
-    showAlert(`Invalid WebSocket URI: ws://${ip}`, 'Error');
+    showAlert(`Invalid WebSocket config or extreme connection error: ws://${ip}`, 'Error');
   }
+  }
+
+  // Initial connection
+  connectWebSocket();
+
+  // Detect Mobile Resume -> Trigger Fast Reconnect
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && isDisconnected && !manualDisconnect) {
+      console.log("[CLIENT] App resumed from background. Triggering immediate reconnect...");
+      reconnectAttempts = 0; // Skip backoff for immediate UX restoration
+      connectWebSocket();
+    }
+  });
 
   let lastMediaKeyTime = 0;
   const MEDIA_DEBOUNCE_MS = 250; 
@@ -1118,7 +1246,7 @@ function initRemoteView(ip_p?: string, user_p?: string, pass_p?: string, name_p?
     btnPush.onclick = async () => {
       if (isDisconnected) return;
       try {
-        const text = await navigator.clipboard.readText();
+        const text = await readText();
         if (text) {
           sendCommand({ type: 'SetClipboard', text });
           showAlert('Local clipboard pushed to remote host!', 'Clipboard Sync');
@@ -1126,7 +1254,7 @@ function initRemoteView(ip_p?: string, user_p?: string, pass_p?: string, name_p?
           showAlert('Local clipboard is empty.', 'Clipboard Sync');
         }
       } catch (err) {
-        showAlert(`Failed to read local clipboard: ${err}\nNote: Browser may require focus or permission.`, 'Error');
+        showAlert(`Failed to read local clipboard: ${err}\nNote: Check permissions or use native desktop version.`, 'Error');
       }
     };
   }

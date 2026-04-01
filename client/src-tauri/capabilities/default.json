@@ -9,6 +9,11 @@
     "core:webview:allow-create-webview-window",
     "opener:default",
     "dialog:default",
-    "notification:default"
+    "notification:default",
+    "fs:default",
+    "fs:allow-write-file",
+    "clipboard-manager:default",
+    "clipboard-manager:allow-read-text",
+    "clipboard-manager:allow-write-text"
   ]
 }
