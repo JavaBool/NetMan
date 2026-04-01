@@ -20,7 +20,7 @@ use xcap::Monitor;
 
 mod file_manager;
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct ProcessItem {
     pub pid: u32,
     pub name: String,
@@ -28,13 +28,13 @@ pub struct ProcessItem {
     pub mem_mb: u64,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct ServiceItem {
     pub name: String,
     pub status: String,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct DriveInfo {
     pub name: String,
     pub mount_point: String,
@@ -43,7 +43,7 @@ pub struct DriveInfo {
     pub drive_type: String,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct FileItem {
     pub name: String,
     pub is_dir: bool,
@@ -52,7 +52,7 @@ pub struct FileItem {
     pub extension: String,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Clone, Deserialize, Debug)]
 #[serde(tag = "type")]
 enum ClientMessage {
     Auth { username: String, password: String },
@@ -102,9 +102,11 @@ enum ClientMessage {
     },
     OpenFile { token: String, path: String },
     ValidatePath { token: String, path: String },
+    StartNotifications { token: String },
+    EndNotifications { token: String },
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Clone, Serialize, Debug)]
 #[serde(tag = "type")]
 enum ServerMessage {
     AuthResult {
@@ -193,6 +195,11 @@ enum ServerMessage {
         data_base64: String,
         is_last: bool,
     },
+    HostNotification {
+        title: String,
+        body: String,
+        source: String,
+    },
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
@@ -243,6 +250,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         hashed_password,
         enigo: Enigo::new(&Settings::default()).unwrap(),
     }));
+
+    // Notification Subscribers and Broadcast
+    let subscriber_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (notif_tx, _) = tokio::sync::broadcast::channel::<ServerMessage>(32);
 
     let addr = "0.0.0.0:8082";
     let listener = TcpListener::bind(&addr).await?;
@@ -344,6 +355,105 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
+    // Global Notification Polling Task
+    let stop_notif = shutdown_token.clone();
+    let notif_tx_spawn = notif_tx.clone();
+    let sub_count_spawn = subscriber_count.clone();
+
+    tokio::spawn(async move {
+        let mut last_id = 0u32;
+        // Initialize last_id to current max on start to avoid flooding old notifications
+        #[cfg(target_os = "windows")]
+        {
+            let script = r#"
+                $ErrorActionPreference = 'SilentlyContinue'
+                Add-Type -AssemblyName System.Runtime.WindowsRuntime
+                $l = [Windows.UI.Notifications.Management.UserNotificationListener]::Current
+                $n = $l.GetNotificationsAsync(1).GetAwaiter().GetResult()
+                if ($n.Count -gt 0) { $n | Measure-Object -Property Id -Maximum | Select-Object -ExpandProperty Maximum } else { 0 }
+            "#;
+            let output = tokio::process::Command::new("powershell")
+                .args(&["-NoProfile", "-Command", script])
+                .output().await;
+            if let Ok(out) = output {
+                let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                last_id = s.parse::<u32>().unwrap_or(0);
+            }
+        }
+
+        loop {
+            if stop_notif.is_cancelled() { break; }
+            let subs = sub_count_spawn.load(std::sync::atomic::Ordering::SeqCst);
+            
+            if subs > 0 {
+                #[cfg(target_os = "windows")]
+                {
+                    let script = format!(r#"
+                        $ErrorActionPreference = 'SilentlyContinue'
+                        Add-Type -AssemblyName System.Runtime.WindowsRuntime
+                        $l = [Windows.UI.Notifications.Management.UserNotificationListener]::Current
+                        # Ensure access is granted (critical for non-packaged dev apps)
+                        if ($l.GetAccessStatusAsync().GetAwaiter().GetResult() -ne 'Allowed') {{
+                            $res = $l.RequestAccessAsync().GetAwaiter().GetResult()
+                        }}
+                        $ns = $l.GetNotificationsAsync(1).GetAwaiter().GetResult()
+                        foreach ($n in $ns) {{
+                            if ($n.Id -gt {}) {{
+                                $id = $n.Id
+                                $app = $n.AppInfo.DisplayInfo.DisplayName
+                                $toast = $n.Notification.Visual.GetBinding([Windows.UI.Notifications.NotificationTemplateNames]::ToastGeneric)
+                                if ($toast) {{
+                                    $texts = $toast.GetTextElements()
+                                    $title = $texts[0].Text.Replace("|", " ")
+                                    $body = ($texts[1..($texts.Length-1)].Text -join " ").Replace("|", " ")
+                                    "$id|$app|$title|$body"
+                                }}
+                            }}
+                        }}
+                    "#, last_id);
+
+                    let output = tokio::process::Command::new("powershell")
+                        .args(&["-NoProfile", "-Command", &script])
+                        .output().await;
+
+                    if let Ok(out) = output {
+                        let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                        if !s.is_empty() {
+                            println!("[SERVER] Notification Poll Raw: {}", s);
+                        }
+                        for line in s.lines() {
+                            let parts: Vec<&str> = line.split('|').collect();
+                            if parts.len() >= 4 {
+                                let id = parts[0].parse::<u32>().unwrap_or(0);
+                                if id > last_id {
+                                    println!("[SERVER] New Notification Found: {} - {}", parts[1], parts[2]);
+                                    last_id = id;
+                                    match notif_tx_spawn.send(ServerMessage::HostNotification {
+                                        title: parts[2].to_string(),
+                                        body: parts[3].to_string(),
+                                        source: parts[1].to_string(),
+                                    }) {
+                                        Ok(n) => println!("[SERVER] Broadcasted notification to {} internal listeners", n),
+                                        Err(e) => eprintln!("[SERVER] Broadcast Error: {}", e),
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                #[cfg(target_os = "linux")]
+                {
+                    // Placeholder for Linux DBus notification signal monitoring 
+                }
+
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            } else {
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            }
+        }
+    });
+
     loop {
         tokio::select! {
             result = listener.accept() => {
@@ -352,8 +462,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let state_c = state.clone();
                     let token_c = shutdown_token_spawn.clone();
                     let stats_rx_c = stats_rx.clone();
+                    let notif_tx_c = notif_tx.clone();
+                    let sub_count_c = subscriber_count.clone();
                     tokio::spawn(async move {
-                        handle_connection(stream, addr, state_c, token_c, stats_rx_c).await;
+                        handle_connection(stream, addr, state_c, token_c, stats_rx_c, notif_tx_c, sub_count_c).await;
                     });
                 }
             }
@@ -369,7 +481,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-async fn handle_connection(stream: TcpStream, addr: std::net::SocketAddr, state: Arc<Mutex<AppState>>, shutdown_token: CancellationToken, mut stats_rx: tokio::sync::watch::Receiver<Option<FullSystemInfo>>) {
+async fn handle_connection(
+    stream: TcpStream, 
+    addr: std::net::SocketAddr, 
+    state: Arc<Mutex<AppState>>, 
+    shutdown_token: CancellationToken, 
+    mut stats_rx: tokio::sync::watch::Receiver<Option<FullSystemInfo>>,
+    notif_tx: tokio::sync::broadcast::Sender<ServerMessage>,
+    subscriber_count: Arc<std::sync::atomic::AtomicUsize>
+) {
     let ws_stream = match accept_async(stream).await {
         Ok(ws) => ws,
         Err(_) => return,
@@ -385,6 +505,8 @@ async fn handle_connection(stream: TcpStream, addr: std::net::SocketAddr, state:
     let (term_v2_out_tx, mut term_v2_out_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     let mut term_v2_in_tx: Option<tokio::sync::mpsc::UnboundedSender<String>> = None;
     let mut master_pty: Option<Box<dyn portable_pty::MasterPty + Send>> = None;
+    let mut is_subscribed = false;
+    let mut notif_rx = notif_tx.subscribe();
     
     // Audio Polling Task
     let (msg_tx, mut msg_rx) = tokio::sync::mpsc::unbounded_channel::<ServerMessage>();
@@ -1297,6 +1419,20 @@ async fn handle_connection(stream: TcpStream, addr: std::net::SocketAddr, state:
                             }
                         }
                     }
+                    Ok(ClientMessage::StartNotifications { token }) => {
+                        if Some(token) == session_token && !is_subscribed {
+                            is_subscribed = true;
+                            subscriber_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            println!("[{}] Client subscribed to notifications.", addr);
+                        }
+                    }
+                    Ok(ClientMessage::EndNotifications { token }) => {
+                        if Some(token) == session_token && is_subscribed {
+                            is_subscribed = false;
+                            subscriber_count.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                            println!("[{}] Client unsubscribed from notifications.", addr);
+                        }
+                    }
                     Err(_) => {}
                 }
             }
@@ -1323,9 +1459,19 @@ async fn handle_connection(stream: TcpStream, addr: std::net::SocketAddr, state:
                     break;
                 }
             }
+            Ok(msg) = notif_rx.recv() => {
+                if is_subscribed {
+                    if sender.send(Message::Text(tokio_tungstenite::tungstenite::Utf8Bytes::from(serde_json::to_string(&msg).unwrap()))).await.is_err() {
+                        break;
+                    }
+                }
+            }
         }
     }
     
+    if is_subscribed {
+        subscriber_count.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
     println!("[{}] Connection formally closed. Dropping OS handles.", addr);
 }
 
@@ -1451,18 +1597,21 @@ fn get_server_capabilities() -> Vec<String> {
         "file_manager".to_string(),
     ];
     
+    let has_display: bool;
+
     if cfg!(target_os = "windows") || cfg!(target_os = "macos") {
         caps.push("screen_share".to_string());
         caps.push("touchpad".to_string());
         caps.push("media".to_string());
         caps.push("presentation".to_string());
         caps.push("screenshot".to_string());
+        has_display = true; 
     } else {
         // Linux / WSL Check
         let is_wsl = std::env::var("WSL_DISTRO_NAME").is_ok() || 
                      std::fs::read_to_string("/proc/version").map(|s| s.to_lowercase().contains("microsoft")).unwrap_or(false);
         
-        let has_display = !is_wsl && (std::env::var("DISPLAY").is_ok() || std::env::var("WAYLAND_DISPLAY").is_ok());
+        has_display = !is_wsl && (std::env::var("DISPLAY").is_ok() || std::env::var("WAYLAND_DISPLAY").is_ok());
         
         if has_display {
             caps.push("screen_share".to_string());
@@ -1472,6 +1621,12 @@ fn get_server_capabilities() -> Vec<String> {
             caps.push("screenshot".to_string());
         }
     }
+
+    // Notifications require a GUI session (especially on Windows/macOS)
+    if has_display {
+        caps.push("notifications".to_string());
+    }
+
     caps
 }
 

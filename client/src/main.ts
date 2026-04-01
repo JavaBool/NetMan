@@ -1,5 +1,6 @@
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { invoke } from '@tauri-apps/api/core';
+import { isPermissionGranted, requestPermission, sendNotification } from '@tauri-apps/plugin-notification';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
@@ -310,11 +311,13 @@ function initRemoteView(ip_p?: string, user_p?: string, pass_p?: string, name_p?
   interface Settings {
     downloadPath: string;
     askDownloadPath: boolean;
+    receiveNotifications: boolean;
   }
 
   let appSettings: Settings = {
     downloadPath: '',
-    askDownloadPath: true
+    askDownloadPath: true,
+    receiveNotifications: true
   };
 
   function loadSettings() {
@@ -327,16 +330,20 @@ function initRemoteView(ip_p?: string, user_p?: string, pass_p?: string, name_p?
     // Update UI if elements exist
     const pathInput = document.getElementById('setting-download-path') as HTMLInputElement;
     const askCheck = document.getElementById('setting-ask-download') as HTMLInputElement;
+    const notifCheck = document.getElementById('setting-receive-notifications') as HTMLInputElement;
     if (pathInput) pathInput.value = appSettings.downloadPath;
     if (askCheck) askCheck.checked = appSettings.askDownloadPath;
+    if (notifCheck) notifCheck.checked = appSettings.receiveNotifications;
   }
 
   function saveSettings() {
     const pathInput = document.getElementById('setting-download-path') as HTMLInputElement;
     const askCheck = document.getElementById('setting-ask-download') as HTMLInputElement;
-    if (pathInput && askCheck) {
+    const notifCheck = document.getElementById('setting-receive-notifications') as HTMLInputElement;
+    if (pathInput && askCheck && notifCheck) {
       appSettings.downloadPath = pathInput.value.trim();
       appSettings.askDownloadPath = askCheck.checked;
+      appSettings.receiveNotifications = notifCheck.checked;
       localStorage.setItem('netman_settings', JSON.stringify(appSettings));
       showAlert('Settings saved successfully.', 'Success');
     }
@@ -742,6 +749,15 @@ function initRemoteView(ip_p?: string, user_p?: string, pass_p?: string, name_p?
               if (presSection) {
                 presSection.style.display = caps.includes('presentation') ? 'block' : 'none';
               }
+
+              // Remote Notifications
+              const isNotifCap = caps.includes('notifications');
+              const notifRow = document.getElementById('setting-notif-row');
+              if (notifRow) notifRow.style.display = isNotifCap ? 'block' : 'none';
+
+              if (isNotifCap && appSettings.receiveNotifications) {
+                sendCommand({ type: 'StartNotifications', token: sessionToken });
+              }
             }
 
             // Activate default tab
@@ -811,6 +827,8 @@ function initRemoteView(ip_p?: string, user_p?: string, pass_p?: string, name_p?
                }
              }
              renderTransferList();
+        } else if (data.type === 'HostNotification') {
+          addHostNotification(data.title, data.body, data.source);
         } else if (data.type === 'ProcessList') {
           const search = (document.getElementById('process-search') as HTMLInputElement).value.toLowerCase();
           renderProcessList(data.processes, search);
@@ -1397,17 +1415,58 @@ function initRemoteView(ip_p?: string, user_p?: string, pass_p?: string, name_p?
         ${d.name} (${Math.round(d.total_gb)}GB)
       </button>
     `).join('');
-    // Wire clicks via event delegation on the parent
-    list.addEventListener('click', (e) => {
-      const target = e.target as HTMLElement;
-      const btn = target.closest('.fm-sidebar-item') as HTMLElement | null;
+    
+    list.onclick = (e: MouseEvent) => {
+      const btn = (e.target as HTMLElement).closest('.fm-sidebar-item');
       if (btn) {
-        const p = btn.dataset.path;
-        if (p) navigateTo(p);
+        const path = (btn as HTMLElement).dataset.path;
+        if (path !== undefined) navigateTo(path);
       }
-    });
-    console.log(`[CLIENT] Rendered ${drives.length} drives in sidebar.`);
+    };
   }
+
+  async function addHostNotification(title: string, body: string, source: string) {
+    console.log(`[CLIENT] Incoming Host Notification: "${title}" from ${source}`);
+    let hasPermission = await isPermissionGranted();
+    console.log(`[CLIENT] Initial Permission Status: ${hasPermission}`);
+    
+    if (!hasPermission) {
+      console.log(`[CLIENT] Requesting notification permission...`);
+      const permission = await requestPermission();
+      hasPermission = permission === 'granted';
+      console.log(`[CLIENT] Permission Request Result: ${permission} (Final: ${hasPermission})`);
+    }
+    
+    if (hasPermission) {
+      try {
+        sendNotification({ title, body });
+        console.log(`[CLIENT] sendNotification() API called successfully for: ${title}`);
+      } catch (err) {
+        console.error(`[CLIENT] sendNotification() API ERROR:`, err);
+      }
+    } else {
+      console.warn(`[CLIENT] Notification permission denied for alert: ${title}`);
+    }
+  }
+
+  document.getElementById('setting-receive-notifications')?.addEventListener('change', async (e) => {
+    const check = e.target as HTMLInputElement;
+    console.log(`[CLIENT] Notification Toggle Changed: ${check.checked}`);
+    if (check.checked) {
+      const hasPermission = await isPermissionGranted();
+      console.log(`[CLIENT] Toggle Status - isPermissionGranted: ${hasPermission}`);
+      if (!hasPermission) {
+        const result = await requestPermission();
+        console.log(`[CLIENT] Toggle Status - requestPermission result: ${result}`);
+      }
+      
+      console.log(`[CLIENT] Sending StartNotifications protocol...`);
+      sendCommand({ type: 'StartNotifications', token: sessionToken });
+    } else {
+      console.log(`[CLIENT] Sending EndNotifications protocol...`);
+      sendCommand({ type: 'EndNotifications', token: sessionToken });
+    }
+  });
 
   function updateSelectionBar() {
     const count = selectedItems.size;
